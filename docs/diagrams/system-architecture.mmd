@@ -1,0 +1,58 @@
+graph TB
+    subgraph Browser["Browser (localhost:3000)"]
+        UI["React UI<br/>Vite + Monaco Editor + TailwindCSS"]
+    end
+
+    subgraph API["API Gateway (localhost:4000)"]
+        direction TB
+        Express["Express Server<br/>Node.js / TypeScript"]
+        subgraph Routes["Route Modules"]
+            R1["/api/transform"]
+            R2["/api/validate"]
+            R3["/api/config"]
+            R4["/api/examples"]
+            R5["/api/share"]
+            R6["/api/sentry-query"]
+            R7["/api/webhooks"]
+        end
+        subgraph Internal["Internal Services"]
+            CA["Config Analyzer<br/>Health Score + Recommendations"]
+            QV["Query Validator<br/>Fuzzy Suggestions"]
+            CD["Config Dictionary<br/>Option Definitions + SE Guidance"]
+        end
+        Express --> Routes
+        R3 --> CA
+        R6 --> QV
+        CA --> CD
+    end
+
+    subgraph SDKs["SDK Containers (Docker Network)"]
+        direction LR
+        JS["JavaScript<br/>:5000<br/>Node.js + eval()"]
+        PY["Python<br/>:5001<br/>Flask + exec()"]
+        DN[".NET<br/>:5002<br/>ASP.NET"]
+        RB["Ruby<br/>:5004<br/>Sinatra + eval()"]
+        PHP2["PHP<br/>:5005<br/>Laravel"]
+        GO["Go<br/>:5006<br/>Gin + compile"]
+        JV["Java<br/>:5007<br/>Spring"]
+        AN["Android<br/>:5008<br/>Kotlin"]
+        CO["Cocoa<br/>:5009<br/>Swift"]
+        RS["Rust<br/>:5010<br/>Actix"]
+        EX["Elixir<br/>:5011<br/>Plug"]
+    end
+
+    UI -->|"HTTP/REST"| Express
+    R1 -->|"POST /transform"| SDKs
+    R2 -->|"POST /validate"| SDKs
+
+    classDef browser fill:#4FC3F7,stroke:#0288D1,color:#000
+    classDef api fill:#81C784,stroke:#388E3C,color:#000
+    classDef route fill:#A5D6A7,stroke:#388E3C,color:#000
+    classDef internal fill:#C8E6C9,stroke:#388E3C,color:#000
+    classDef sdk fill:#FFB74D,stroke:#F57C00,color:#000
+
+    class UI browser
+    class Express api
+    class R1,R2,R3,R4,R5,R6,R7 route
+    class CA,QV,CD internal
+    class JS,PY,DN,RB,PHP2,GO,JV,AN,CO,RS,EX sdk

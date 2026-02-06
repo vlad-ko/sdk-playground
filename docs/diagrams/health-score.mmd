@@ -1,0 +1,56 @@
+graph TD
+    Start["Start: Score = 100"] --> Parse["Parse Sentry.init() config<br/>(regex-based, per-language)"]
+
+    Parse --> Analyze["Analyze each option against<br/>Config Dictionary"]
+
+    Analyze --> Warn{"Warnings Found?"}
+
+    Warn -->|"Error severity<br/>(missing DSN, invalid DSN)"| ErrDeduct["-15 per error"]
+    Warn -->|"Warning severity<br/>(debug=true, 100% sample rate)"| WarnDeduct["-5 per warning"]
+
+    Analyze --> Missing["Check missing required options"]
+    Missing --> MissReq{"Missing required?"}
+    MissReq -->|"dsn missing"| ErrDeduct
+
+    Analyze --> Recs["Generate Recommendations"]
+    Recs --> HighRec{"High priority missing?<br/>environment, release"}
+    HighRec --> HighDeduct["-10 per high rec"]
+
+    Recs --> MedRec{"Medium priority missing?<br/>tracesSampleRate, beforeSend"}
+    MedRec --> MedDeduct["-5 per medium rec"]
+
+    ErrDeduct --> Bonus
+    WarnDeduct --> Bonus
+    HighDeduct --> Bonus
+    MedDeduct --> Bonus
+
+    Bonus["Bonus Points"]
+    Bonus -->|"Has environment"| B1["+5"]
+    Bonus -->|"Has release"| B2["+5"]
+    Bonus -->|"Has beforeSend"| B3["+5"]
+
+    B1 --> Clamp["Clamp to 0-100"]
+    B2 --> Clamp
+    B3 --> Clamp
+
+    Clamp --> Result{"Final Score"}
+
+    Result -->|">= 90"| Green["GREEN<br/>Excellent configuration"]
+    Result -->|">= 70"| Yellow["YELLOW<br/>Good, improvements recommended"]
+    Result -->|"< 70"| Red["RED<br/>Needs improvement"]
+
+    classDef start fill:#E3F2FD,stroke:#1565C0,color:#000
+    classDef process fill:#F3E5F5,stroke:#7B1FA2,color:#000
+    classDef deduct fill:#FFEBEE,stroke:#C62828,color:#000
+    classDef bonus fill:#E8F5E9,stroke:#2E7D32,color:#000
+    classDef green fill:#4CAF50,stroke:#1B5E20,color:#fff
+    classDef yellow fill:#FFC107,stroke:#F57F17,color:#000
+    classDef red fill:#F44336,stroke:#B71C1C,color:#fff
+
+    class Start start
+    class Parse,Analyze,Missing,Recs,Bonus,Clamp process
+    class ErrDeduct,WarnDeduct,HighDeduct,MedDeduct deduct
+    class B1,B2,B3 bonus
+    class Green green
+    class Yellow yellow
+    class Red red
