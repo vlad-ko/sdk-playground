@@ -352,6 +352,38 @@ describe('Sentry Query Route', () => {
       expect(response.body.endpoint).toBe('issues');
       expect(response.body.warning).toContain('Discover URLs are not fully supported');
     });
+
+    it('should strip Unicode Private Use Area characters from query', async () => {
+      // This URL contains %EF%80%8D (U+F00D) characters that Sentry UI uses for formatting
+      const response = await request(app)
+        .post('/api/sentry-query/parse-url')
+        .send({
+          url: 'https://demo.sentry.io/issues/?project=4508968134377472&query=is%3Aunresolved%20level%3A%EF%80%8DContains%EF%80%8Derror&referrer=issue-list&statsPeriod=14d',
+        })
+        .set('Content-Type', 'application/json');
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.org).toBe('demo');
+      expect(response.body.query).toBe('is:unresolved level:Containserror');
+      expect(response.body.project).toBe('4508968134377472');
+      expect(response.body.statsPeriod).toBe('14d');
+    });
+
+    it('should handle various Unicode Private Use Area characters in query', async () => {
+      // Test with multiple PUA characters (U+E000 to U+F8FF range)
+      const response = await request(app)
+        .post('/api/sentry-query/parse-url')
+        .send({
+          url: 'https://team-se-oi.sentry.io/issues/?query=test%EE%80%80value%EF%A3%BFend',
+        })
+        .set('Content-Type', 'application/json');
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      // PUA characters should be stripped, leaving just the clean text
+      expect(response.body.query).toBe('testvalueend');
+    });
   });
 
   describe('GET /api/sentry-query/properties', () => {
