@@ -256,7 +256,10 @@ router.post('/parse-url', (req: Request, res: Response) => {
     }
 
     // Extract query parameters
-    const query = parsedUrl.searchParams.get('query') || undefined;
+    // Strip Unicode Private Use Area characters (U+E000-U+F8FF) that Sentry UI uses for formatting
+    // These characters appear in URLs like %EF%80%8D (U+F00D) and can cause display/parsing issues
+    const rawQuery = parsedUrl.searchParams.get('query');
+    const query = rawQuery ? rawQuery.replace(/[\uE000-\uF8FF]/g, '') : undefined;
     const environment = parsedUrl.searchParams.get('environment') || undefined;
     const project = parsedUrl.searchParams.get('project') || undefined;
     const statsPeriod = parsedUrl.searchParams.get('statsPeriod') || undefined;
