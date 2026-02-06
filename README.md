@@ -290,9 +290,15 @@ Share your configurations securely with colleagues or customers:
 - **[API Query Tester Guide](docs/api-query-tester/README.md)** - Query testing
 - **[Webhooks Guide](docs/modes/webhooks.md)** - Webhook testing
 
+### Architecture
+- **[Architecture Overview](docs/architecture.md)** - System design and structure
+- **[Architecture Deep Dive](docs/architecture-deep-dive.md)** - Detailed technical docs with visual diagrams
+  - [System Architecture Diagram](docs/diagrams/system-architecture.png) - 3-tier Docker microservices layout
+  - [Request Flow Diagram](docs/diagrams/request-flow.png) - Sequence diagrams for transform, config analysis, and query validation
+  - [Health Score Algorithm](docs/diagrams/health-score.png) - Flowchart of the scoring and recommendation engine
+
 ### Reference
 - **[API Reference](docs/api-reference.md)** - API endpoints and usage
-- **[Architecture](docs/architecture.md)** - System design and structure
 - **[Development Guide](docs/development.md)** - Contributing, testing, TDD workflow
 - **[Troubleshooting](docs/troubleshooting.md)** - Common issues and solutions
 

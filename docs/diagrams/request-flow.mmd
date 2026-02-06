@@ -1,0 +1,38 @@
+sequenceDiagram
+    participant U as Browser (UI)
+    participant A as API Gateway
+    participant S as SDK Container
+
+    rect rgb(227, 242, 253)
+        Note over U,S: Transform Flow (beforeSend, tracesSampler, etc.)
+        U->>+A: POST /api/transform<br/>{sdk, event, beforeSendCode}
+        A->>A: Validate JSON syntax
+        A->>A: Validate Sentry event structure
+        A->>A: Check SDK registry availability
+        A->>+S: POST /transform<br/>{event, beforeSendCode}
+        S->>S: Parse user code (eval/exec/compile)
+        S->>S: Execute with cloned event
+        S-->>-A: {success, transformedEvent}
+        A-->>-U: {success, original, transformed}
+    end
+
+    rect rgb(232, 245, 233)
+        Note over U,A: Config Analyzer Flow (no SDK container needed)
+        U->>+A: POST /api/config/analyze<br/>{configCode, sdk}
+        A->>A: Parse config (regex-based)
+        A->>A: Validate options against dictionary
+        A->>A: Check missing required options
+        A->>A: Generate recommendations
+        A->>A: Calculate health score (0-100)
+        A-->>-U: {score, warnings, recommendations, summary}
+    end
+
+    rect rgb(255, 243, 224)
+        Note over U,A: Query Validation Flow
+        U->>+A: POST /api/sentry-query/validate<br/>{query}
+        A->>A: Parse query components
+        A->>A: Validate properties
+        A->>A: Alias map lookup
+        A->>A: Levenshtein fuzzy matching
+        A-->>-U: {valid, components, suggestions}
+    end
