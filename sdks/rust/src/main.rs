@@ -536,7 +536,7 @@ struct ValidateConfigRequest {
 }
 
 /// Response from /validate-config
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct ConfigValidationResponse {
     success: bool,
     sdk: String,

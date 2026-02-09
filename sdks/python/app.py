@@ -202,14 +202,17 @@ def validate_config():
                 warnings.simplefilter("always")
 
                 # Build namespace for exec with sentry_sdk available
-                exec_globals = {
+                # Use a single dict for globals+locals to avoid closure scoping
+                # issues (closures in exec'd code look up names in globals, not locals)
+                exec_namespace = {
                     'sentry_sdk': sentry_sdk,
                     '__builtins__': __builtins__,
                 }
-                exec_locals = {}
 
                 # Inject noop transport into the config code
                 # We wrap the user's init call to intercept and add transport override
+                import textwrap
+                indented_config = textwrap.indent(config_code.strip(), '    ')
                 wrapper_code = f"""
 import sentry_sdk
 from sentry_sdk.transport import Transport
@@ -228,11 +231,11 @@ def _patched_init(*args, **kwargs):
 sentry_sdk.init = _patched_init
 
 try:
-    {config_code}
+{indented_config}
 finally:
     sentry_sdk.init = _original_init
 """
-                exec(wrapper_code, exec_globals, exec_locals)
+                exec(wrapper_code, exec_namespace)
 
                 # Collect warnings
                 for warning in w:

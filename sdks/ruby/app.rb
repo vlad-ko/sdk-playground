@@ -2,6 +2,7 @@
 
 require 'sinatra'
 require 'json'
+require 'stringio'
 
 # Configure Sinatra for API mode
 set :bind, '0.0.0.0'
@@ -163,11 +164,9 @@ post '/validate-config' do
       require 'sentry-ruby'
       sdk_version = defined?(Sentry::VERSION) ? Sentry::VERSION : 'unknown'
 
-      # Capture warnings by overriding Kernel.warn
-      original_warn = method(:warn)
-      define_method(:warn) do |*args|
-        captured_warnings << args.join(' ')
-      end
+      # Capture warnings by redirecting $stderr (Kernel.warn writes to $stderr)
+      original_stderr = $stderr
+      $stderr = StringIO.new
 
       # Execute the config code with Sentry available
       # Patch Sentry.init to inject noop transport
@@ -213,6 +212,9 @@ post '/validate-config' do
           # ignore
         end
 
+        # Collect captured warnings from $stderr
+        captured_warnings = $stderr.string.split("\n").reject(&:empty?)
+
         {
           success: true,
           sdk: 'ruby',
@@ -224,6 +226,9 @@ post '/validate-config' do
           ignoredKeys: []
         }.to_json
       rescue StandardError => e
+        # Collect captured warnings from $stderr
+        captured_warnings = $stderr.is_a?(StringIO) ? $stderr.string.split("\n").reject(&:empty?) : []
+
         {
           success: true,
           sdk: 'ruby',
@@ -236,9 +241,9 @@ post '/validate-config' do
           ignoredKeys: []
         }.to_json
       ensure
-        # Restore original init and warn
+        # Restore original init and $stderr
         Sentry.define_singleton_method(:init, original_init)
-        define_method(:warn, original_warn)
+        $stderr = original_stderr
       end
 
     rescue LoadError => e

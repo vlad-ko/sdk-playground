@@ -362,7 +362,6 @@ app.MapPost("/validate-config", async (ValidateConfigRequest request) =>
     }
     catch (Exception ex)
     {
-        Console.SetError(originalErr);
         return Results.Json(new {
             success = false,
             error = $"Validation service error: {ex.Message}"
