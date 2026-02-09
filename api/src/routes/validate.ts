@@ -96,7 +96,7 @@ router.post('/', async (req: Request, res: Response) => {
       return res.json(validationResult);
     } catch (error: any) {
       // If SDK container is not reachable or doesn't support validation yet
-      if (error.code === 'ECONNREFUSED' || error.response?.status === 404) {
+      if (error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND' || error.code === 'ECONNRESET' || error.response?.status === 404) {
         // Fallback: return valid (no validation available)
         return res.json({
           valid: true,

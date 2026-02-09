@@ -189,7 +189,7 @@ describe('Transform API Route', () => {
 
       expect(response.status).toBe(400);
       expect(response.body.success).toBe(false);
-      expect(response.body.error).toContain('event_id, exception, or message');
+      expect(response.body.error).toContain('valid Sentry event');
     });
 
     it('should return 400 for unknown SDK', async () => {
