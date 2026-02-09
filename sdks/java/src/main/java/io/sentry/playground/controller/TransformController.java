@@ -121,6 +121,12 @@ public class TransformController {
                     }
                 }
             }
+            // Close Sentry to release background threads and shutdown hooks
+            try {
+                io.sentry.Sentry.close();
+            } catch (Exception e) {
+                // ignore
+            }
         }
 
         result.put("warnings", warnings);

@@ -70,6 +70,13 @@ class TransformController(private val transformService: TransformService) {
         } catch (e: Exception) {
             result["initSucceeded"] = false
             result["error"] = e.message
+        } finally {
+            // Close Sentry to release background threads and shutdown hooks
+            try {
+                io.sentry.Sentry.close()
+            } catch (_: Exception) {
+                // ignore
+            }
         }
 
         return ResponseEntity.ok(result)
