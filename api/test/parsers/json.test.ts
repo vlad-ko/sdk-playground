@@ -109,7 +109,7 @@ describe('JSON Parser', () => {
 
       expect(result.valid).toBe(false);
       expect(result.error).toBeDefined();
-      expect(result.error).toContain('event_id, exception, or message');
+      expect(result.error).toContain('valid Sentry event');
     });
 
     it('should validate event with all common fields', () => {

@@ -28,6 +28,20 @@ defmodule SdkPlayground.Router do
     end
   end
 
+  post "/validate-config" do
+    case conn.body_params do
+      %{"configCode" => config_code} ->
+        validate_config(conn, config_code)
+
+      _ ->
+        send_error(conn, 400, "Missing required field: configCode")
+    end
+  end
+
+  get "/introspect" do
+    introspect_sdk(conn)
+  end
+
   get "/health" do
     conn
     |> put_resp_content_type("application/json")
@@ -160,6 +174,96 @@ defmodule SdkPlayground.Router do
           })
         )
     end
+  end
+
+  defp validate_config(conn, config_code) do
+    try do
+      {_result, _binding} = Code.eval_string(config_code)
+
+      conn
+      |> put_resp_content_type("application/json")
+      |> send_resp(
+        200,
+        Jason.encode!(%{
+          success: true,
+          sdk: "elixir",
+          sdkVersion: "unknown",
+          initSucceeded: true,
+          warnings: [],
+          resolvedOptions: %{},
+          recognizedKeys: [],
+          ignoredKeys: []
+        })
+      )
+    rescue
+      e ->
+        conn
+        |> put_resp_content_type("application/json")
+        |> send_resp(
+          200,
+          Jason.encode!(%{
+            success: true,
+            sdk: "elixir",
+            sdkVersion: "unknown",
+            initSucceeded: false,
+            error: Exception.message(e),
+            warnings: [],
+            resolvedOptions: %{},
+            recognizedKeys: [],
+            ignoredKeys: []
+          })
+        )
+    end
+  end
+
+  defp introspect_sdk(conn) do
+    # Manifest-based introspection for Elixir SDK
+    manifest_path = Path.join(:code.priv_dir(:sdk_playground), "introspection-manifest.json")
+
+    response =
+      if File.exists?(manifest_path) do
+        case File.read(manifest_path) do
+          {:ok, content} ->
+            case Jason.decode(content) do
+              {:ok, manifest} -> manifest
+              _ -> default_introspection_manifest()
+            end
+
+          _ ->
+            default_introspection_manifest()
+        end
+      else
+        default_introspection_manifest()
+      end
+
+    conn
+    |> put_resp_content_type("application/json")
+    |> send_resp(200, Jason.encode!(response))
+  end
+
+  defp default_introspection_manifest do
+    %{
+      sdk: "elixir",
+      sdkVersion: "unknown",
+      sdkPackage: "sentry",
+      source: "manifest",
+      options: [
+        %{key: "dsn", canonicalKey: "dsn", type: "string", required: true, default: nil, description: "Data Source Name"},
+        %{key: "environment_name", canonicalKey: "environment", type: "string", required: false, default: nil, description: "Environment name"},
+        %{key: "release", canonicalKey: "release", type: "string", required: false, default: nil, description: "Release version"},
+        %{key: "sample_rate", canonicalKey: "sampleRate", type: "float", required: false, default: 1.0, description: "Error sample rate"},
+        %{key: "traces_sample_rate", canonicalKey: "tracesSampleRate", type: "float", required: false, default: nil, description: "Traces sample rate"},
+        %{key: "before_send", canonicalKey: "beforeSend", type: "function", required: false, default: nil, description: "Hook before sending event"},
+        %{key: "included_environments", canonicalKey: "includedEnvironments", type: "array", required: false, default: nil, description: "Environments to send events for"},
+        %{key: "max_breadcrumbs", canonicalKey: "maxBreadcrumbs", type: "integer", required: false, default: 100, description: "Max breadcrumbs"},
+        %{key: "enable_source_code_context", canonicalKey: "enableSourceCodeContext", type: "boolean", required: false, default: false, description: "Include source code in events"},
+        %{key: "root_source_code_paths", canonicalKey: "rootSourceCodePaths", type: "array", required: false, default: nil, description: "Paths for source code context"},
+        %{key: "context_lines", canonicalKey: "contextLines", type: "integer", required: false, default: 3, description: "Number of context lines"},
+        %{key: "tags", canonicalKey: "tags", type: "object", required: false, default: %{}, description: "Default tags"},
+        %{key: "filter", canonicalKey: "filter", type: "function", required: false, default: nil, description: "Event filter module"}
+      ],
+      timestamp: DateTime.utc_now() |> DateTime.to_iso8601()
+    }
   end
 
   defp send_error(conn, status, message, traceback \\ nil) do

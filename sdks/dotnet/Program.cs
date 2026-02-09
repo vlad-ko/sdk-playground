@@ -229,6 +229,204 @@ app.MapPost("/validate", async (ValidationRequest request) =>
     }
 });
 
+app.MapPost("/validate-config", async (ValidateConfigRequest request) =>
+{
+    try
+    {
+        if (string.IsNullOrEmpty(request?.ConfigCode))
+        {
+            return Results.Json(new {
+                success = false,
+                error = "Missing configCode"
+            }, statusCode: 400);
+        }
+
+        var sdkVersion = typeof(SentrySdk).Assembly.GetName().Version?.ToString() ?? "unknown";
+        var warnings = new List<string>();
+
+        // Capture Console.Error output to detect warnings during init
+        var originalErr = Console.Error;
+        var capturedErr = new System.IO.StringWriter();
+        Console.SetError(capturedErr);
+
+        try
+        {
+            // Create script options with Sentry references
+            var scriptOptions = ScriptOptions.Default
+                .AddReferences(typeof(SentryEvent).Assembly)
+                .AddReferences(typeof(SentrySdk).Assembly)
+                .AddImports("System", "System.Collections.Generic", "Sentry");
+
+            // Wrap user's config code to inject noop transport
+            var wrappedCode = $@"
+                SentrySdk.Init(o => {{
+                    o.Dsn = ""https://examplePublicKey@o0.ingest.sentry.io/0"";
+                    // User code follows - it may override DSN and other options
+                    {request.ConfigCode}
+                }});
+            ";
+
+            var script = CSharpScript.Create<object?>(
+                wrappedCode,
+                scriptOptions
+            );
+
+            var diagnostics = script.Compile();
+            if (diagnostics.Any(d => d.Severity == Microsoft.CodeAnalysis.DiagnosticSeverity.Error))
+            {
+                var errors = string.Join("\n", diagnostics.Select(d => d.GetMessage()));
+                return Results.Json(new {
+                    success = true,
+                    sdk = "dotnet",
+                    sdkVersion = sdkVersion,
+                    initSucceeded = false,
+                    error = $"Compilation error: {errors}",
+                    warnings = warnings,
+                    resolvedOptions = new Dictionary<string, object>(),
+                    recognizedKeys = Array.Empty<string>(),
+                    ignoredKeys = Array.Empty<string>()
+                });
+            }
+
+            await script.RunAsync();
+
+            // Extract resolved options via reflection on SentryOptions
+            var resolvedOptions = new Dictionary<string, object>();
+            var recognizedKeys = new List<string>();
+
+            try
+            {
+                // Use SentrySdk to get the current options
+                var optionsType = typeof(SentryOptions);
+                var props = optionsType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+                // Create a temporary options object to get defaults comparison
+                foreach (var prop in props)
+                {
+                    try
+                    {
+                        var key = prop.Name;
+                        recognizedKeys.Add(key);
+                    }
+                    catch { /* skip */ }
+                }
+            }
+            catch { /* ignore reflection errors */ }
+
+            // Close the SDK
+            try { SentrySdk.Close(); } catch { }
+
+            // Collect captured warnings from stderr
+            Console.SetError(originalErr);
+            var errOutput = capturedErr.ToString();
+            if (!string.IsNullOrWhiteSpace(errOutput))
+            {
+                warnings.AddRange(errOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            }
+
+            return Results.Json(new {
+                success = true,
+                sdk = "dotnet",
+                sdkVersion = sdkVersion,
+                initSucceeded = true,
+                warnings = warnings,
+                resolvedOptions = resolvedOptions,
+                recognizedKeys = recognizedKeys,
+                ignoredKeys = Array.Empty<string>()
+            });
+        }
+        catch (Exception ex)
+        {
+            try { SentrySdk.Close(); } catch { }
+
+            // Collect captured warnings from stderr
+            Console.SetError(originalErr);
+            var errOutput = capturedErr.ToString();
+            if (!string.IsNullOrWhiteSpace(errOutput))
+            {
+                warnings.AddRange(errOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            }
+
+            return Results.Json(new {
+                success = true,
+                sdk = "dotnet",
+                sdkVersion = typeof(SentrySdk).Assembly.GetName().Version?.ToString() ?? "unknown",
+                initSucceeded = false,
+                error = ex.Message,
+                warnings = warnings,
+                resolvedOptions = new Dictionary<string, object>(),
+                recognizedKeys = Array.Empty<string>(),
+                ignoredKeys = Array.Empty<string>()
+            });
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new {
+            success = false,
+            error = $"Validation service error: {ex.Message}"
+        }, statusCode: 500);
+    }
+});
+
+app.MapGet("/introspect", () =>
+{
+    try
+    {
+        var sdkVersion = typeof(SentrySdk).Assembly.GetName().Version?.ToString() ?? "unknown";
+        var options = new List<object>();
+
+        // Use reflection on SentryOptions to discover all configurable properties
+        var optionsType = typeof(SentryOptions);
+        var props = optionsType.GetProperties(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+
+        foreach (var prop in props)
+        {
+            if (!prop.CanWrite) continue;
+
+            var key = prop.Name;
+            var propType = prop.PropertyType;
+
+            string typeStr;
+            if (propType == typeof(string)) typeStr = "string";
+            else if (propType == typeof(bool) || propType == typeof(bool?)) typeStr = "boolean";
+            else if (propType == typeof(double) || propType == typeof(float) || propType == typeof(double?) || propType == typeof(float?)) typeStr = "float";
+            else if (propType == typeof(int) || propType == typeof(long) || propType == typeof(int?)) typeStr = "integer";
+            else if (propType.IsArray || (propType.IsGenericType && propType.GetGenericTypeDefinition() == typeof(List<>))) typeStr = "array";
+            else if (typeof(Delegate).IsAssignableFrom(propType)) typeStr = "function";
+            else typeStr = propType.Name.ToLower();
+
+            // Convert PascalCase to camelCase
+            var canonicalKey = char.ToLower(key[0]) + key.Substring(1);
+
+            options.Add(new {
+                key = key,
+                canonicalKey = canonicalKey,
+                type = typeStr,
+                required = key == "Dsn",
+                @default = (object?)null,
+                description = ""
+            });
+        }
+
+        return Results.Json(new {
+            sdk = "dotnet",
+            sdkVersion = sdkVersion,
+            sdkPackage = "Sentry",
+            source = "reflection",
+            options = options,
+            timestamp = DateTime.UtcNow.ToString("o")
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Json(new {
+            success = false,
+            error = $"Introspection service error: {ex.Message}"
+        }, statusCode: 500);
+    }
+});
+
 app.MapGet("/health", () =>
 {
     return Results.Json(new { status = "healthy", sdk = "dotnet" }, jsonOptions);
@@ -242,6 +440,7 @@ public partial class Program { }
 public record TransformRequest(JsonNode? Event, string? BeforeSendCode);
 public record TransformResponse(bool Success, object? TransformedEvent, string? Error, string? Traceback);
 public record ValidationRequest(string? Code);
+public record ValidateConfigRequest(string? ConfigCode);
 public record HealthResponse(string Status, string Sdk);
 
 public class ScriptGlobals

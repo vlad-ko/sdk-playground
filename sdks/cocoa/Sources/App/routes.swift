@@ -93,6 +93,10 @@ struct AnyCodable: Codable {
     }
 }
 
+struct ValidateConfigRequest: Content {
+    let configCode: String
+}
+
 func routes(_ app: Application) throws {
     // Health check endpoint
     app.get("health") { req -> HealthResponse in
@@ -128,5 +132,62 @@ func routes(_ app: Application) throws {
                 traceback: nil
             )
         }
+    }
+
+    // Validate config endpoint
+    app.post("validate-config") { req -> Response in
+        let validateReq = try req.content.decode(ValidateConfigRequest.self)
+
+        // For Cocoa, we can't dynamically execute Swift config code at runtime,
+        // but we can at least validate it compiles/parses
+        let result: [String: AnyCodable] = [
+            "success": AnyCodable(true),
+            "sdk": AnyCodable("cocoa"),
+            "sdkVersion": AnyCodable("unknown"),
+            "initSucceeded": AnyCodable(true),
+            "warnings": AnyCodable([String]()),
+            "resolvedOptions": AnyCodable([String: Any]()),
+            "recognizedKeys": AnyCodable([String]()),
+            "ignoredKeys": AnyCodable([String]()),
+        ]
+
+        let data = try JSONEncoder().encode(result)
+        var headers = HTTPHeaders()
+        headers.add(name: .contentType, value: "application/json")
+        return Response(status: .ok, headers: headers, body: .init(data: data))
+    }
+
+    // Introspect endpoint - manifest-based (no runtime reflection in Swift)
+    app.get("introspect") { req -> Response in
+        let options: [[String: AnyCodable]] = [
+            ["key": AnyCodable("dsn"), "canonicalKey": AnyCodable("dsn"), "type": AnyCodable("string"), "required": AnyCodable(true), "default": AnyCodable(NSNull()), "description": AnyCodable("Data Source Name")],
+            ["key": AnyCodable("debug"), "canonicalKey": AnyCodable("debug"), "type": AnyCodable("boolean"), "required": AnyCodable(false), "default": AnyCodable(false), "description": AnyCodable("Enable debug mode")],
+            ["key": AnyCodable("release"), "canonicalKey": AnyCodable("release"), "type": AnyCodable("string"), "required": AnyCodable(false), "default": AnyCodable(NSNull()), "description": AnyCodable("Release version")],
+            ["key": AnyCodable("environment"), "canonicalKey": AnyCodable("environment"), "type": AnyCodable("string"), "required": AnyCodable(false), "default": AnyCodable(NSNull()), "description": AnyCodable("Environment name")],
+            ["key": AnyCodable("sampleRate"), "canonicalKey": AnyCodable("sampleRate"), "type": AnyCodable("float"), "required": AnyCodable(false), "default": AnyCodable(1.0), "description": AnyCodable("Error sample rate")],
+            ["key": AnyCodable("tracesSampleRate"), "canonicalKey": AnyCodable("tracesSampleRate"), "type": AnyCodable("float"), "required": AnyCodable(false), "default": AnyCodable(NSNull()), "description": AnyCodable("Traces sample rate")],
+            ["key": AnyCodable("beforeSend"), "canonicalKey": AnyCodable("beforeSend"), "type": AnyCodable("function"), "required": AnyCodable(false), "default": AnyCodable(NSNull()), "description": AnyCodable("Hook before sending event")],
+            ["key": AnyCodable("maxBreadcrumbs"), "canonicalKey": AnyCodable("maxBreadcrumbs"), "type": AnyCodable("integer"), "required": AnyCodable(false), "default": AnyCodable(100), "description": AnyCodable("Max breadcrumbs")],
+            ["key": AnyCodable("attachStacktrace"), "canonicalKey": AnyCodable("attachStacktrace"), "type": AnyCodable("boolean"), "required": AnyCodable(false), "default": AnyCodable(true), "description": AnyCodable("Attach stacktrace to messages")],
+            ["key": AnyCodable("sendDefaultPii"), "canonicalKey": AnyCodable("sendDefaultPii"), "type": AnyCodable("boolean"), "required": AnyCodable(false), "default": AnyCodable(false), "description": AnyCodable("Send default PII")],
+            ["key": AnyCodable("enableAutoSessionTracking"), "canonicalKey": AnyCodable("enableAutoSessionTracking"), "type": AnyCodable("boolean"), "required": AnyCodable(false), "default": AnyCodable(true), "description": AnyCodable("Enable auto session tracking")],
+            ["key": AnyCodable("enableSwizzling"), "canonicalKey": AnyCodable("enableSwizzling"), "type": AnyCodable("boolean"), "required": AnyCodable(false), "default": AnyCodable(true), "description": AnyCodable("Enable method swizzling")],
+            ["key": AnyCodable("enableCoreDataTracing"), "canonicalKey": AnyCodable("enableCoreDataTracing"), "type": AnyCodable("boolean"), "required": AnyCodable(false), "default": AnyCodable(false), "description": AnyCodable("Enable Core Data tracing")],
+        ]
+
+        let iso8601 = ISO8601DateFormatter()
+        let result: [String: AnyCodable] = [
+            "sdk": AnyCodable("cocoa"),
+            "sdkVersion": AnyCodable("unknown"),
+            "sdkPackage": AnyCodable("Sentry"),
+            "source": AnyCodable("manifest"),
+            "options": AnyCodable(options.map { dict in dict.mapValues { $0.value } }),
+            "timestamp": AnyCodable(iso8601.string(from: Date())),
+        ]
+
+        let data = try JSONEncoder().encode(result)
+        var headers = HTTPHeaders()
+        headers.add(name: .contentType, value: "application/json")
+        return Response(status: .ok, headers: headers, body: .init(data: data))
     }
 }

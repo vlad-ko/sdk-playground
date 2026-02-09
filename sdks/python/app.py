@@ -3,8 +3,25 @@ import json
 import sys
 import traceback
 import inspect
+import warnings
+import importlib
 
 app = Flask(__name__)
+
+
+def _get_sdk_version():
+    """Get the installed sentry-sdk version"""
+    try:
+        import sentry_sdk
+        return sentry_sdk.VERSION
+    except Exception:
+        return 'unknown'
+
+
+def _snaketo_camel(name):
+    """Convert snake_case to camelCase"""
+    parts = name.split('_')
+    return parts[0] + ''.join(p.capitalize() for p in parts[1:])
 
 @app.route('/transform', methods=['POST'])
 def transform():
@@ -150,6 +167,252 @@ def validate():
             'valid': False,
             'errors': [{'message': f'Validation service error: {str(e)}'}]
         }), 500
+
+@app.route('/validate-config', methods=['POST'])
+def validate_config():
+    """
+    Validate config endpoint
+    Executes Sentry.init() with user's config code using a noop transport
+    to verify the configuration actually works against the real SDK.
+    """
+    try:
+        data = request.get_json()
+
+        if not data or 'configCode' not in data:
+            return jsonify({
+                'success': False,
+                'error': 'Missing configCode'
+            }), 400
+
+        config_code = data['configCode']
+        captured_warnings = []
+        sdk_version = _get_sdk_version()
+
+        try:
+            import sentry_sdk
+            from sentry_sdk.transport import Transport
+
+            # Noop transport - sends nothing
+            class NoopTransport(Transport):
+                def capture_envelope(self, *args, **kwargs):
+                    pass
+
+            # Capture warnings during init
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+
+                # Build namespace for exec with sentry_sdk available
+                # Use a single dict for globals+locals to avoid closure scoping
+                # issues (closures in exec'd code look up names in globals, not locals)
+                exec_namespace = {
+                    'sentry_sdk': sentry_sdk,
+                    '__builtins__': __builtins__,
+                }
+
+                # Inject noop transport into the config code
+                # We wrap the user's init call to intercept and add transport override
+                import textwrap
+                indented_config = textwrap.indent(config_code.strip(), '    ')
+                wrapper_code = f"""
+import sentry_sdk
+from sentry_sdk.transport import Transport
+
+class _NoopTransport(Transport):
+    def capture_envelope(self, *args, **kwargs):
+        pass
+
+_original_init = sentry_sdk.init
+
+def _patched_init(*args, **kwargs):
+    kwargs['transport'] = _NoopTransport
+    kwargs.setdefault('dsn', 'https://examplePublicKey@o0.ingest.sentry.io/0')
+    return _original_init(*args, **kwargs)
+
+sentry_sdk.init = _patched_init
+
+try:
+{indented_config}
+finally:
+    sentry_sdk.init = _original_init
+"""
+                exec(wrapper_code, exec_namespace)
+
+                # Collect warnings
+                for warning in w:
+                    captured_warnings.append(str(warning.message))
+
+            # Extract resolved options from the current client
+            resolved_options = {}
+            recognized_keys = []
+            try:
+                client = sentry_sdk.get_client()
+                if client and hasattr(client, 'options'):
+                    opts = client.options
+                    if isinstance(opts, dict):
+                        for k, v in opts.items():
+                            try:
+                                json.dumps(v)
+                                resolved_options[k] = v
+                            except (TypeError, ValueError):
+                                resolved_options[k] = str(v)
+                            recognized_keys.append(k)
+                    elif hasattr(opts, '__dict__'):
+                        for k, v in vars(opts).items():
+                            if not k.startswith('_'):
+                                try:
+                                    json.dumps(v)
+                                    resolved_options[k] = v
+                                except (TypeError, ValueError):
+                                    resolved_options[k] = str(v)
+                                recognized_keys.append(k)
+            except Exception:
+                pass
+
+            # Clean up - close the client
+            try:
+                client = sentry_sdk.get_client()
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
+            return jsonify({
+                'success': True,
+                'sdk': 'python',
+                'sdkVersion': sdk_version,
+                'initSucceeded': True,
+                'warnings': captured_warnings,
+                'resolvedOptions': resolved_options,
+                'recognizedKeys': recognized_keys,
+                'ignoredKeys': [],
+            })
+
+        except Exception as e:
+            # Clean up - close the client to avoid leaking background threads
+            try:
+                client = sentry_sdk.get_client()
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
+            error_trace = traceback.format_exc()
+            return jsonify({
+                'success': True,
+                'sdk': 'python',
+                'sdkVersion': sdk_version,
+                'initSucceeded': False,
+                'error': str(e),
+                'warnings': captured_warnings,
+                'resolvedOptions': {},
+                'recognizedKeys': [],
+                'ignoredKeys': [],
+            })
+
+    except Exception as e:
+        print(f'Validate-config error: {str(e)}', file=sys.stderr)
+        return jsonify({
+            'success': False,
+            'error': f'Validation service error: {str(e)}'
+        }), 500
+
+
+@app.route('/introspect', methods=['GET'])
+def introspect():
+    """
+    Introspect endpoint
+    Uses reflection to discover available Sentry SDK configuration options.
+    """
+    try:
+        import sentry_sdk
+
+        sdk_version = _get_sdk_version()
+        options = []
+
+        # Method 1: Inspect sentry_sdk.init signature
+        try:
+            sig = inspect.signature(sentry_sdk.init)
+            for name, param in sig.parameters.items():
+                if name in ('args', 'kwargs', 'self'):
+                    continue
+
+                opt_type = 'any'
+                if param.annotation != inspect.Parameter.empty:
+                    opt_type = str(param.annotation).replace('typing.', '')
+
+                default_val = None
+                required = True
+                if param.default != inspect.Parameter.empty:
+                    default_val = param.default
+                    required = False
+                    # Try to serialize, fall back to str
+                    try:
+                        json.dumps(default_val)
+                    except (TypeError, ValueError):
+                        default_val = str(default_val)
+
+                options.append({
+                    'key': name,
+                    'canonicalKey': _snaketo_camel(name),
+                    'type': opt_type,
+                    'required': required,
+                    'default': default_val,
+                    'description': '',
+                })
+        except Exception:
+            pass
+
+        # Method 2: Inspect Client class options for more comprehensive list
+        try:
+            from sentry_sdk.client import Client
+            # Look at __init__ parameters
+            sig = inspect.signature(Client.__init__)
+            existing_keys = {o['key'] for o in options}
+            for name, param in sig.parameters.items():
+                if name in ('self', 'args', 'kwargs') or name in existing_keys:
+                    continue
+
+                opt_type = 'any'
+                if param.annotation != inspect.Parameter.empty:
+                    opt_type = str(param.annotation).replace('typing.', '')
+
+                default_val = None
+                required = True
+                if param.default != inspect.Parameter.empty:
+                    default_val = param.default
+                    required = False
+                    try:
+                        json.dumps(default_val)
+                    except (TypeError, ValueError):
+                        default_val = str(default_val)
+
+                options.append({
+                    'key': name,
+                    'canonicalKey': _snaketo_camel(name),
+                    'type': opt_type,
+                    'required': required,
+                    'default': default_val,
+                    'description': '',
+                })
+        except Exception:
+            pass
+
+        return jsonify({
+            'sdk': 'python',
+            'sdkVersion': sdk_version,
+            'sdkPackage': 'sentry-sdk',
+            'source': 'reflection',
+            'options': options,
+            'timestamp': __import__('datetime').datetime.utcnow().isoformat() + 'Z',
+        })
+
+    except Exception as e:
+        print(f'Introspect error: {str(e)}', file=sys.stderr)
+        return jsonify({
+            'success': False,
+            'error': f'Introspection service error: {str(e)}'
+        }), 500
+
 
 @app.route('/health', methods=['GET'])
 def health():

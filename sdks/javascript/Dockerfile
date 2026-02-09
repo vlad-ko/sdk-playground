@@ -11,8 +11,8 @@ RUN npm install
 # Copy source code
 COPY . .
 
-# Build TypeScript
-RUN npm run build
+# Build TypeScript (remove stale dist/ that may come from COPY)
+RUN rm -rf dist && npm run build
 
 EXPOSE 5000
 

@@ -17,6 +17,9 @@ import {
   ElixirConfigParser,
 } from '../config-parsers';
 import { ConfigAnalyzer } from '../config-analyzer';
+import { validateConfigLive } from '../sdk-introspection/config-validator';
+import { introspectSDK } from '../sdk-introspection/sdk-introspector';
+import { syncDictionary } from '../sdk-introspection/dictionary-sync';
 
 const router = Router();
 
@@ -223,6 +226,91 @@ router.get('/options/:key', (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to retrieve option',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * POST /api/config/validate-live
+ * Validate configuration code against the real SDK container
+ */
+router.post('/validate-live', async (req: Request, res: Response) => {
+  try {
+    const { sdk, configCode } = req.body;
+
+    if (!configCode) {
+      return res.status(400).json({
+        error: 'Missing required field: configCode',
+      });
+    }
+
+    if (!sdk) {
+      return res.status(400).json({
+        error: 'Missing required field: sdk',
+      });
+    }
+
+    const result = await validateConfigLive(sdk, configCode);
+
+    return res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error: any) {
+    console.error('Live config validation error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to validate configuration',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/config/introspect/:sdk
+ * Introspect available options from a real SDK container
+ */
+router.get('/introspect/:sdk', async (req: Request, res: Response) => {
+  try {
+    const sdk = typeof req.params.sdk === 'string' ? req.params.sdk : req.params.sdk[0];
+
+    const result = await introspectSDK(sdk);
+
+    return res.json({
+      success: true,
+      data: result,
+    });
+  } catch (error: any) {
+    console.error('SDK introspection error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to introspect SDK',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/config/dictionary/sync/:sdk
+ * Compare manual dictionary against live introspected data
+ */
+router.get('/dictionary/sync/:sdk', async (req: Request, res: Response) => {
+  try {
+    const sdk = typeof req.params.sdk === 'string' ? req.params.sdk : req.params.sdk[0];
+
+    const introspection = await introspectSDK(sdk);
+    const syncResult = syncDictionary(sdk, introspection);
+
+    return res.json({
+      success: true,
+      data: syncResult,
+    });
+  } catch (error: any) {
+    console.error('Dictionary sync error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to sync dictionary',
       message: error.message,
     });
   }

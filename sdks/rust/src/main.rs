@@ -528,6 +528,243 @@ fn parse_rust_errors(error_msg: &str) -> Vec<ValidationError> {
     errors
 }
 
+/// Request body for the /validate-config endpoint
+#[derive(Debug, Deserialize)]
+struct ValidateConfigRequest {
+    #[serde(rename = "configCode")]
+    config_code: String,
+}
+
+/// Response from /validate-config
+#[derive(Debug, Serialize, Deserialize)]
+struct ConfigValidationResponse {
+    success: bool,
+    sdk: String,
+    #[serde(rename = "sdkVersion")]
+    sdk_version: String,
+    #[serde(rename = "initSucceeded")]
+    init_succeeded: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    warnings: Vec<String>,
+    #[serde(rename = "resolvedOptions")]
+    resolved_options: serde_json::Map<String, Value>,
+    #[serde(rename = "recognizedKeys")]
+    recognized_keys: Vec<String>,
+    #[serde(rename = "ignoredKeys")]
+    ignored_keys: Vec<String>,
+}
+
+/// Validate config by compiling a temporary Cargo project that calls sentry::init()
+async fn validate_config(req: web::Json<ValidateConfigRequest>) -> impl Responder {
+    let temp_dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ConfigValidationResponse {
+                success: false,
+                sdk: "rust".to_string(),
+                sdk_version: String::new(),
+                init_succeeded: false,
+                error: Some(format!("Failed to create temp directory: {}", e)),
+                warnings: vec![],
+                resolved_options: serde_json::Map::new(),
+                recognized_keys: vec![],
+                ignored_keys: vec![],
+            });
+        }
+    };
+
+    let project_path = temp_dir.path();
+    let src_path = project_path.join("src");
+    let _ = fs::create_dir(&src_path);
+
+    let cargo_toml = r#"[package]
+name = "validate-config"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sentry = "0.34"
+serde_json = "1.0"
+"#;
+    let _ = fs::write(project_path.join("Cargo.toml"), cargo_toml);
+
+    let main_rs = format!(
+        r##"use sentry::{{ClientOptions, init}};
+use serde_json::json;
+
+fn main() {{
+    // User's config code
+    let result = std::panic::catch_unwind(|| {{
+        {config_code}
+    }});
+
+    match result {{
+        Ok(_) => {{
+            println!("{{}}", json!({{
+                "success": true,
+                "sdk": "rust",
+                "sdkVersion": env!("CARGO_PKG_VERSION"),
+                "initSucceeded": true,
+                "warnings": [],
+                "resolvedOptions": {{}},
+                "recognizedKeys": [],
+                "ignoredKeys": []
+            }}));
+        }}
+        Err(e) => {{
+            let msg = if let Some(s) = e.downcast_ref::<String>() {{
+                s.clone()
+            }} else if let Some(s) = e.downcast_ref::<&str>() {{
+                s.to_string()
+            }} else {{
+                "Unknown panic".to_string()
+            }};
+            println!("{{}}", json!({{
+                "success": true,
+                "sdk": "rust",
+                "sdkVersion": "unknown",
+                "initSucceeded": false,
+                "error": msg,
+                "warnings": [],
+                "resolvedOptions": {{}},
+                "recognizedKeys": [],
+                "ignoredKeys": []
+            }}));
+        }}
+    }}
+}}
+"##,
+        config_code = req.config_code
+    );
+
+    let _ = fs::write(src_path.join("main.rs"), main_rs);
+
+    // Compile
+    let compile_output = Command::new("cargo")
+        .args(["build", "--release", "--quiet"])
+        .current_dir(project_path)
+        .output();
+
+    match compile_output {
+        Ok(output) if !output.status.success() => {
+            let error_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            return HttpResponse::Ok().json(ConfigValidationResponse {
+                success: true,
+                sdk: "rust".to_string(),
+                sdk_version: String::new(),
+                init_succeeded: false,
+                error: Some(format!("Compilation error: {}", extract_error_summary(&error_msg))),
+                warnings: vec![],
+                resolved_options: serde_json::Map::new(),
+                recognized_keys: vec![],
+                ignored_keys: vec![],
+            });
+        }
+        Err(e) => {
+            return HttpResponse::InternalServerError().json(ConfigValidationResponse {
+                success: false,
+                sdk: "rust".to_string(),
+                sdk_version: String::new(),
+                init_succeeded: false,
+                error: Some(format!("Failed to compile: {}", e)),
+                warnings: vec![],
+                resolved_options: serde_json::Map::new(),
+                recognized_keys: vec![],
+                ignored_keys: vec![],
+            });
+        }
+        _ => {}
+    }
+
+    // Execute
+    let exec_output = Command::new(project_path.join("target/release/validate-config"))
+        .current_dir(project_path)
+        .output();
+
+    match exec_output {
+        Ok(output) if output.status.success() => {
+            let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            match serde_json::from_str::<ConfigValidationResponse>(&output_str) {
+                Ok(result) => HttpResponse::Ok().json(result),
+                Err(e) => HttpResponse::InternalServerError().json(ConfigValidationResponse {
+                    success: false,
+                    sdk: "rust".to_string(),
+                    sdk_version: String::new(),
+                    init_succeeded: false,
+                    error: Some(format!("Failed to parse result: {}", e)),
+                    warnings: vec![],
+                    resolved_options: serde_json::Map::new(),
+                    recognized_keys: vec![],
+                    ignored_keys: vec![],
+                }),
+            }
+        }
+        Ok(output) => {
+            let error_msg = String::from_utf8_lossy(&output.stderr).to_string();
+            HttpResponse::Ok().json(ConfigValidationResponse {
+                success: true,
+                sdk: "rust".to_string(),
+                sdk_version: String::new(),
+                init_succeeded: false,
+                error: Some(format!("Runtime error: {}", error_msg)),
+                warnings: vec![],
+                resolved_options: serde_json::Map::new(),
+                recognized_keys: vec![],
+                ignored_keys: vec![],
+            })
+        }
+        Err(e) => HttpResponse::InternalServerError().json(ConfigValidationResponse {
+            success: false,
+            sdk: "rust".to_string(),
+            sdk_version: String::new(),
+            init_succeeded: false,
+            error: Some(format!("Execution failed: {}", e)),
+            warnings: vec![],
+            resolved_options: serde_json::Map::new(),
+            recognized_keys: vec![],
+            ignored_keys: vec![],
+        }),
+    }
+}
+
+/// Introspect endpoint - returns manifest-based options (no runtime reflection in Rust)
+async fn introspect() -> impl Responder {
+    // Try to load manifest from file, fall back to inline
+    let manifest_path = std::path::Path::new("introspection-manifest.json");
+    if manifest_path.exists() {
+        if let Ok(content) = fs::read_to_string(manifest_path) {
+            if let Ok(manifest) = serde_json::from_str::<Value>(&content) {
+                return HttpResponse::Ok().json(manifest);
+            }
+        }
+    }
+
+    // Fallback inline manifest for common Rust SDK options
+    HttpResponse::Ok().json(serde_json::json!({
+        "sdk": "rust",
+        "sdkVersion": "0.34",
+        "sdkPackage": "sentry",
+        "source": "manifest",
+        "options": [
+            {"key": "dsn", "canonicalKey": "dsn", "type": "string", "required": true, "default": null, "description": "Data Source Name"},
+            {"key": "debug", "canonicalKey": "debug", "type": "boolean", "required": false, "default": false, "description": "Enable debug mode"},
+            {"key": "release", "canonicalKey": "release", "type": "string", "required": false, "default": null, "description": "Release version"},
+            {"key": "environment", "canonicalKey": "environment", "type": "string", "required": false, "default": null, "description": "Environment name"},
+            {"key": "sample_rate", "canonicalKey": "sampleRate", "type": "float", "required": false, "default": 1.0, "description": "Error sample rate"},
+            {"key": "traces_sample_rate", "canonicalKey": "tracesSampleRate", "type": "float", "required": false, "default": null, "description": "Traces sample rate"},
+            {"key": "before_send", "canonicalKey": "beforeSend", "type": "function", "required": false, "default": null, "description": "Hook before sending event"},
+            {"key": "max_breadcrumbs", "canonicalKey": "maxBreadcrumbs", "type": "integer", "required": false, "default": 100, "description": "Max breadcrumbs"},
+            {"key": "attach_stacktrace", "canonicalKey": "attachStacktrace", "type": "boolean", "required": false, "default": true, "description": "Attach stacktrace to messages"},
+            {"key": "send_default_pii", "canonicalKey": "sendDefaultPii", "type": "boolean", "required": false, "default": false, "description": "Send default PII"},
+            {"key": "server_name", "canonicalKey": "serverName", "type": "string", "required": false, "default": null, "description": "Server name"},
+            {"key": "in_app_include", "canonicalKey": "inAppInclude", "type": "array", "required": false, "default": [], "description": "Modules to include as in-app"},
+            {"key": "in_app_exclude", "canonicalKey": "inAppExclude", "type": "array", "required": false, "default": [], "description": "Modules to exclude from in-app"}
+        ],
+        "timestamp": format!("{:?}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs())
+    }))
+}
+
 /// Health check endpoint
 async fn health() -> impl Responder {
     HttpResponse::Ok().json(HealthResponse {
@@ -544,6 +781,8 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .route("/transform", web::post().to(transform))
             .route("/validate", web::post().to(validate))
+            .route("/validate-config", web::post().to(validate_config))
+            .route("/introspect", web::get().to(introspect))
             .route("/health", web::get().to(health))
     })
     .bind(("0.0.0.0", 5010))?
