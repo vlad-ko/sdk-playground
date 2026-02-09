@@ -285,6 +285,14 @@ finally:
             })
 
         except Exception as e:
+            # Clean up - close the client to avoid leaking background threads
+            try:
+                client = sentry_sdk.get_client()
+                if client:
+                    client.close()
+            except Exception:
+                pass
+
             error_trace = traceback.format_exc()
             return jsonify({
                 'success': True,

@@ -209,27 +209,31 @@ $app->post('/validate-config', function (Request $request, Response $response) {
             // Execute the config code with a noop transport
             $resolvedOptions = [];
 
-            // Create wrapper that injects noop transport
-            $wrapperCode = <<<'WRAPPER'
-use Sentry\Transport\TransportInterface;
-use Sentry\Transport\Result;
-use Sentry\Transport\ResultStatus;
-
-$noopTransport = new class implements TransportInterface {
-    public function send(\Sentry\Event $event): Result {
-        return new Result(ResultStatus::success());
+            // Define a safe init wrapper that injects before_send to drop all events
+            $initWrapperCode = <<<'INITWRAPPER'
+function __playground_safe_init($options = []) {
+    if (is_callable($options)) {
+        \Sentry\init(function (\Sentry\Options $sentryOptions) use ($options) {
+            $options($sentryOptions);
+            $sentryOptions->setBeforeSendCallback(function () { return null; });
+        });
+    } elseif (is_array($options)) {
+        $options['before_send'] = function () { return null; };
+        if (!isset($options['dsn'])) {
+            $options['dsn'] = 'https://examplePublicKey@o0.ingest.sentry.io/0';
+        }
+        \Sentry\init($options);
+    } else {
+        \Sentry\init($options);
     }
-    public function close(?int $timeout = null): Result {
-        return new Result(ResultStatus::success());
-    }
-};
-WRAPPER;
+}
+INITWRAPPER;
 
-            eval($wrapperCode);
+            eval($initWrapperCode);
 
-            // Monkey-patch: wrap the user's init to add noop transport
-            $originalInit = '\Sentry\init';
-            eval($configCode);
+            // Replace \Sentry\init( calls with our safe wrapper
+            $safeConfigCode = preg_replace('/\\\\?Sentry\\\\init\s*\(/', '__playground_safe_init(', $configCode);
+            eval($safeConfigCode);
 
             // Try to extract resolved options from current hub
             try {
