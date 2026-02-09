@@ -139,6 +139,204 @@ post '/validate' do
   end
 end
 
+# Validate config endpoint
+# Executes Sentry.init with user's config code using a noop transport
+post '/validate-config' do
+  content_type :json
+
+  begin
+    request.body.rewind
+    data = JSON.parse(request.body.read)
+
+    unless data['configCode']
+      return [
+        400,
+        { success: false, error: 'Missing configCode' }.to_json
+      ]
+    end
+
+    config_code = data['configCode']
+    captured_warnings = []
+    sdk_version = 'unknown'
+
+    begin
+      require 'sentry-ruby'
+      sdk_version = defined?(Sentry::VERSION) ? Sentry::VERSION : 'unknown'
+
+      # Capture warnings
+      original_warn = method(:warn)
+
+      # Execute the config code with Sentry available
+      # Patch Sentry.init to inject noop transport
+      original_init = Sentry.method(:init)
+      resolved_options = {}
+
+      Sentry.define_singleton_method(:init) do |&block|
+        config_obj = nil
+        original_init.call do |config|
+          config.dsn = 'https://examplePublicKey@o0.ingest.sentry.io/0' unless config.dsn
+          config.transport.transport_class = Class.new(Sentry::Transport) do
+            def send_data(data); end
+          end
+          block.call(config) if block
+          config_obj = config
+        end
+
+        # Extract resolved options
+        if config_obj
+          config_obj.instance_variables.each do |var|
+            key = var.to_s.sub('@', '')
+            next if key.start_with?('_')
+            begin
+              val = config_obj.instance_variable_get(var)
+              JSON.generate(val) rescue val = val.to_s
+              resolved_options[key] = val
+            rescue StandardError
+              # skip non-serializable
+            end
+          end
+        end
+      end
+
+      begin
+        eval(config_code)
+
+        recognized_keys = resolved_options.keys
+
+        # Clean up
+        begin
+          Sentry.close if Sentry.initialized?
+        rescue StandardError
+          # ignore
+        end
+
+        {
+          success: true,
+          sdk: 'ruby',
+          sdkVersion: sdk_version,
+          initSucceeded: true,
+          warnings: captured_warnings,
+          resolvedOptions: resolved_options,
+          recognizedKeys: recognized_keys,
+          ignoredKeys: []
+        }.to_json
+      rescue StandardError => e
+        {
+          success: true,
+          sdk: 'ruby',
+          sdkVersion: sdk_version,
+          initSucceeded: false,
+          error: e.message,
+          warnings: captured_warnings,
+          resolvedOptions: {},
+          recognizedKeys: [],
+          ignoredKeys: []
+        }.to_json
+      ensure
+        # Restore original init
+        Sentry.define_singleton_method(:init, original_init)
+      end
+
+    rescue LoadError => e
+      {
+        success: true,
+        sdk: 'ruby',
+        sdkVersion: sdk_version,
+        initSucceeded: false,
+        error: "sentry-ruby not available: #{e.message}",
+        warnings: [],
+        resolvedOptions: {},
+        recognizedKeys: [],
+        ignoredKeys: []
+      }.to_json
+    end
+
+  rescue JSON::ParserError => e
+    [400, { success: false, error: "Invalid JSON: #{e.message}" }.to_json]
+  rescue StandardError => e
+    warn "Validate-config error: #{e.message}"
+    [500, { success: false, error: "Validation service error: #{e.message}" }.to_json]
+  end
+end
+
+# Introspect endpoint
+# Discovers available Sentry SDK configuration options via reflection
+get '/introspect' do
+  content_type :json
+
+  begin
+    require 'sentry-ruby'
+    sdk_version = defined?(Sentry::VERSION) ? Sentry::VERSION : 'unknown'
+
+    options = []
+
+    # Use Sentry::Configuration to discover available options
+    begin
+      config_class = Sentry::Configuration
+      # Get setter methods (which represent configurable options)
+      setters = config_class.instance_methods(false).select { |m| m.to_s.end_with?('=') }
+
+      setters.each do |setter|
+        key = setter.to_s.chomp('=')
+        next if key.start_with?('_')
+
+        # Try to get the default value
+        default_val = nil
+        opt_type = 'any'
+        begin
+          temp_config = config_class.new
+          val = temp_config.send(key)
+          default_val = val
+          opt_type = case val
+                     when String then 'string'
+                     when Integer then 'integer'
+                     when Float then 'float'
+                     when TrueClass, FalseClass then 'boolean'
+                     when Array then 'array'
+                     when Hash then 'object'
+                     when NilClass then 'any'
+                     when Proc then 'callable'
+                     else 'any'
+                     end
+          # Ensure serializable
+          JSON.generate(default_val) rescue default_val = default_val.to_s
+        rescue StandardError
+          # ignore
+        end
+
+        # Convert snake_case to camelCase for canonical key
+        canonical = key.gsub(/_([a-z])/) { $1.upcase }
+
+        options << {
+          key: key,
+          canonicalKey: canonical,
+          type: opt_type,
+          required: key == 'dsn',
+          default: default_val,
+          description: ''
+        }
+      end
+    rescue StandardError => e
+      warn "Introspection reflection error: #{e.message}"
+    end
+
+    {
+      sdk: 'ruby',
+      sdkVersion: sdk_version,
+      sdkPackage: 'sentry-ruby',
+      source: 'reflection',
+      options: options,
+      timestamp: Time.now.utc.iso8601
+    }.to_json
+
+  rescue LoadError => e
+    [500, { success: false, error: "sentry-ruby not available: #{e.message}" }.to_json]
+  rescue StandardError => e
+    warn "Introspect error: #{e.message}"
+    [500, { success: false, error: "Introspection service error: #{e.message}" }.to_json]
+  end
+end
+
 # Health check endpoint
 get '/health' do
   content_type :json

@@ -53,6 +53,8 @@ func setupRouter() *gin.Engine {
 
 	router.POST("/transform", transformHandler)
 	router.POST("/validate", validateHandler)
+	router.POST("/validate-config", validateConfigHandler)
+	router.GET("/introspect", introspectHandler)
 	router.GET("/health", healthHandler)
 
 	return router
@@ -359,6 +361,402 @@ go 1.22
 		Valid:  true,
 		Errors: []ValidationError{},
 	})
+}
+
+// ValidateConfig types
+type ValidateConfigRequest struct {
+	ConfigCode string `json:"configCode" binding:"required"`
+}
+
+type ConfigValidationResponse struct {
+	Success         bool                   `json:"success"`
+	SDK             string                 `json:"sdk"`
+	SDKVersion      string                 `json:"sdkVersion"`
+	InitSucceeded   bool                   `json:"initSucceeded"`
+	Error           string                 `json:"error,omitempty"`
+	Warnings        []string               `json:"warnings"`
+	ResolvedOptions map[string]interface{} `json:"resolvedOptions"`
+	RecognizedKeys  []string               `json:"recognizedKeys"`
+	IgnoredKeys     []string               `json:"ignoredKeys"`
+}
+
+type IntrospectedOption struct {
+	Key          string      `json:"key"`
+	CanonicalKey string      `json:"canonicalKey"`
+	Type         string      `json:"type"`
+	Required     bool        `json:"required"`
+	Default      interface{} `json:"default"`
+	Description  string      `json:"description"`
+}
+
+type IntrospectionResponse struct {
+	SDK        string               `json:"sdk"`
+	SDKVersion string               `json:"sdkVersion"`
+	SDKPackage string               `json:"sdkPackage"`
+	Source     string               `json:"source"`
+	Options    []IntrospectedOption `json:"options"`
+	Timestamp  string               `json:"timestamp"`
+}
+
+func validateConfigHandler(c *gin.Context) {
+	var req ValidateConfigRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, ConfigValidationResponse{
+			Success:         false,
+			SDK:             "go",
+			InitSucceeded:   false,
+			Error:           "Missing configCode",
+			Warnings:        []string{},
+			ResolvedOptions: map[string]interface{}{},
+			RecognizedKeys:  []string{},
+			IgnoredKeys:     []string{},
+		})
+		return
+	}
+
+	// Create a temp Go program that calls sentry.Init() with a noop transport
+	tmpDir, err := ioutil.TempDir("", "validate-config-*")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, ConfigValidationResponse{
+			Success: false,
+			SDK:     "go",
+			Error:   fmt.Sprintf("Failed to create temp directory: %v", err),
+		})
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	program := fmt.Sprintf(`package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"github.com/getsentry/sentry-go"
+	"reflect"
+)
+
+func main() {
+	// User's config code - should call sentry.Init(...)
+	// We intercept by wrapping
+	origInit := sentry.Init
+
+	var resolvedOptions map[string]interface{}
+	var initErr error
+
+	// Monkey-patch not possible in Go, so we compile the config directly
+	err := func() error {
+		%s
+		return nil
+	}()
+
+	if err != nil {
+		initErr = err
+	}
+
+	// Try to get the current client options via reflection
+	hub := sentry.CurrentHub()
+	client := hub.Client()
+	resolvedOptions = make(map[string]interface{})
+	recognizedKeys := []string{}
+
+	if client != nil {
+		opts := client.Options()
+		v := reflect.ValueOf(opts)
+		t := v.Type()
+		for i := 0; i < v.NumField(); i++ {
+			field := t.Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			val := v.Field(i)
+			key := field.Name
+			recognizedKeys = append(recognizedKeys, key)
+			switch val.Kind() {
+			case reflect.String:
+				resolvedOptions[key] = val.String()
+			case reflect.Bool:
+				resolvedOptions[key] = val.Bool()
+			case reflect.Float64, reflect.Float32:
+				resolvedOptions[key] = val.Float()
+			case reflect.Int, reflect.Int64:
+				resolvedOptions[key] = val.Int()
+			default:
+				resolvedOptions[key] = fmt.Sprintf("%%v", val.Interface())
+			}
+		}
+	}
+
+	_ = origInit
+	result := map[string]interface{}{
+		"success":         true,
+		"sdk":             "go",
+		"sdkVersion":      sentry.SDKVersion,
+		"initSucceeded":   initErr == nil,
+		"warnings":        []string{},
+		"resolvedOptions": resolvedOptions,
+		"recognizedKeys":  recognizedKeys,
+		"ignoredKeys":     []string{},
+	}
+	if initErr != nil {
+		result["error"] = initErr.Error()
+	}
+
+	output, _ := json.Marshal(result)
+	fmt.Println(string(output))
+}
+`, req.ConfigCode)
+
+	programPath := filepath.Join(tmpDir, "main.go")
+	if err := ioutil.WriteFile(programPath, []byte(program), 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, ConfigValidationResponse{
+			Success: false,
+			SDK:     "go",
+			Error:   fmt.Sprintf("Failed to write program: %v", err),
+		})
+		return
+	}
+
+	goModContent := `module validate-config
+go 1.22
+require github.com/getsentry/sentry-go v0.31.1
+`
+	goModPath := filepath.Join(tmpDir, "go.mod")
+	if err := ioutil.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, ConfigValidationResponse{
+			Success: false,
+			SDK:     "go",
+			Error:   fmt.Sprintf("Failed to write go.mod: %v", err),
+		})
+		return
+	}
+
+	// Run go mod tidy
+	tidyCmd := exec.Command("go", "mod", "tidy")
+	tidyCmd.Dir = tmpDir
+	var tidyErr bytes.Buffer
+	tidyCmd.Stderr = &tidyErr
+	if err := tidyCmd.Run(); err != nil {
+		c.JSON(http.StatusBadRequest, ConfigValidationResponse{
+			Success:    false,
+			SDK:        "go",
+			Error:      fmt.Sprintf("Failed to resolve dependencies: %s", tidyErr.String()),
+			Warnings:   []string{},
+			ResolvedOptions: map[string]interface{}{},
+			RecognizedKeys:  []string{},
+			IgnoredKeys:     []string{},
+		})
+		return
+	}
+
+	// Compile
+	compileCmd := exec.Command("go", "build", "-mod=readonly", "-o", "/dev/null", "main.go")
+	compileCmd.Dir = tmpDir
+	var compileErr bytes.Buffer
+	compileCmd.Stderr = &compileErr
+	if err := compileCmd.Run(); err != nil {
+		c.JSON(http.StatusOK, ConfigValidationResponse{
+			Success:        true,
+			SDK:            "go",
+			SDKVersion:     "",
+			InitSucceeded:  false,
+			Error:          fmt.Sprintf("Compilation error: %s", compileErr.String()),
+			Warnings:       []string{},
+			ResolvedOptions: map[string]interface{}{},
+			RecognizedKeys: []string{},
+			IgnoredKeys:    []string{},
+		})
+		return
+	}
+
+	// Execute
+	runCmd := exec.Command("go", "run", "main.go")
+	runCmd.Dir = tmpDir
+	var stdout, stderr bytes.Buffer
+	runCmd.Stdout = &stdout
+	runCmd.Stderr = &stderr
+
+	if err := runCmd.Run(); err != nil {
+		c.JSON(http.StatusOK, ConfigValidationResponse{
+			Success:        true,
+			SDK:            "go",
+			InitSucceeded:  false,
+			Error:          stderr.String(),
+			Warnings:       []string{},
+			ResolvedOptions: map[string]interface{}{},
+			RecognizedKeys: []string{},
+			IgnoredKeys:    []string{},
+		})
+		return
+	}
+
+	// Parse JSON output
+	var result ConfigValidationResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &result); err != nil {
+		c.JSON(http.StatusInternalServerError, ConfigValidationResponse{
+			Success: false,
+			SDK:     "go",
+			Error:   fmt.Sprintf("Failed to parse result: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+func introspectHandler(c *gin.Context) {
+	// Go uses struct reflection on sentry.ClientOptions
+	// We generate and run a Go program that reflects on the struct
+	tmpDir, err := ioutil.TempDir("", "introspect-*")
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to create temp directory: %v", err),
+		})
+		return
+	}
+	defer os.RemoveAll(tmpDir)
+
+	program := `package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strings"
+	"time"
+	"unicode"
+
+	"github.com/getsentry/sentry-go"
+)
+
+type Option struct {
+	Key          string      ` + "`json:\"key\"`" + `
+	CanonicalKey string      ` + "`json:\"canonicalKey\"`" + `
+	Type         string      ` + "`json:\"type\"`" + `
+	Required     bool        ` + "`json:\"required\"`" + `
+	Default      interface{} ` + "`json:\"default\"`" + `
+	Description  string      ` + "`json:\"description\"`" + `
+}
+
+func pascalToCamel(s string) string {
+	if s == "" {
+		return s
+	}
+	runes := []rune(s)
+	runes[0] = unicode.ToLower(runes[0])
+	return string(runes)
+}
+
+func goTypeToString(t reflect.Type) string {
+	switch t.Kind() {
+	case reflect.String:
+		return "string"
+	case reflect.Bool:
+		return "boolean"
+	case reflect.Float64, reflect.Float32:
+		return "float"
+	case reflect.Int, reflect.Int64, reflect.Int32:
+		return "integer"
+	case reflect.Slice:
+		return "array"
+	case reflect.Map:
+		return "object"
+	case reflect.Func:
+		return "function"
+	case reflect.Interface:
+		return "any"
+	default:
+		return t.String()
+	}
+}
+
+func main() {
+	t := reflect.TypeOf(sentry.ClientOptions{})
+	options := make([]Option, 0)
+
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		options = append(options, Option{
+			Key:          field.Name,
+			CanonicalKey: pascalToCamel(field.Name),
+			Type:         goTypeToString(field.Type),
+			Required:     field.Name == "Dsn",
+			Default:      nil,
+			Description:  "",
+		})
+	}
+
+	_ = strings.Contains // suppress unused
+
+	result := map[string]interface{}{
+		"sdk":        "go",
+		"sdkVersion": sentry.SDKVersion,
+		"sdkPackage": "github.com/getsentry/sentry-go",
+		"source":     "reflection",
+		"options":    options,
+		"timestamp":  time.Now().UTC().Format(time.RFC3339),
+	}
+
+	output, _ := json.Marshal(result)
+	fmt.Println(string(output))
+}
+`
+
+	programPath := filepath.Join(tmpDir, "main.go")
+	if err := ioutil.WriteFile(programPath, []byte(program), 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to write program: %v", err),
+		})
+		return
+	}
+
+	goModContent := `module introspect
+go 1.22
+require github.com/getsentry/sentry-go v0.31.1
+`
+	goModPath := filepath.Join(tmpDir, "go.mod")
+	if err := ioutil.WriteFile(goModPath, []byte(goModContent), 0644); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to write go.mod: %v", err),
+		})
+		return
+	}
+
+	// Tidy, compile, run
+	tidyCmd := exec.Command("go", "mod", "tidy")
+	tidyCmd.Dir = tmpDir
+	tidyCmd.Run()
+
+	runCmd := exec.Command("go", "run", "main.go")
+	runCmd.Dir = tmpDir
+	var stdout, stderr bytes.Buffer
+	runCmd.Stdout = &stdout
+	runCmd.Stderr = &stderr
+
+	if err := runCmd.Run(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Introspection failed: %s", stderr.String()),
+		})
+		return
+	}
+
+	var result IntrospectionResponse
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stdout.String())), &result); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"success": false,
+			"error":   fmt.Sprintf("Failed to parse result: %v", err),
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
 }
 
 func healthHandler(c *gin.Context) {

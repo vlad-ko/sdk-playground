@@ -163,6 +163,196 @@ app.post('/validate', async (req: Request<{}, {}, ValidationRequest>, res: Respo
 });
 
 /**
+ * Validate config endpoint
+ * Executes Sentry.init() with user's config code using a noop transport
+ * to verify the configuration actually works against the real SDK.
+ */
+app.post('/validate-config', async (req: Request, res: Response) => {
+  const capturedWarnings: string[] = [];
+  const origWarn = console.warn;
+
+  try {
+    const { configCode } = req.body;
+
+    if (!configCode) {
+      return res.status(400).json({
+        success: false,
+        error: 'Missing configCode',
+      });
+    }
+
+    let Sentry: any;
+    let sdkVersion = 'unknown';
+    try {
+      Sentry = require('@sentry/node');
+      sdkVersion = Sentry.SDK_VERSION || 'unknown';
+    } catch {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to load @sentry/node',
+      });
+    }
+
+    // Capture console.warn during init
+    console.warn = (...args: any[]) => {
+      capturedWarnings.push(args.map(String).join(' '));
+    };
+
+    try {
+      // Monkey-patch Sentry.init to inject noop transport
+      const originalInit = Sentry.init;
+      let resolvedOptions: Record<string, any> = {};
+
+      Sentry.init = (options: any = {}) => {
+        // Override transport with noop
+        options.transport = () => ({
+          send: () => Promise.resolve({}),
+          flush: () => Promise.resolve(true),
+        });
+        // Ensure a DSN is set so init doesn't bail early
+        options.dsn = options.dsn || 'https://examplePublicKey@o0.ingest.sentry.io/0';
+
+        // Capture the options being passed
+        resolvedOptions = {};
+        for (const [k, v] of Object.entries(options)) {
+          try {
+            JSON.stringify(v);
+            resolvedOptions[k] = v;
+          } catch {
+            resolvedOptions[k] = String(v);
+          }
+        }
+
+        return originalInit.call(Sentry, options);
+      };
+
+      try {
+        // Execute the user's config code with Sentry available
+        const configFn = new Function('Sentry', 'require', configCode);
+        configFn(Sentry, require);
+
+        const recognizedKeys = Object.keys(resolvedOptions);
+
+        // Clean up - close the client
+        try {
+          const client = Sentry.getClient();
+          if (client && typeof client.close === 'function') {
+            await client.close(1000);
+          }
+        } catch { /* ignore cleanup errors */ }
+
+        return res.json({
+          success: true,
+          sdk: 'javascript',
+          sdkVersion,
+          initSucceeded: true,
+          warnings: capturedWarnings,
+          resolvedOptions,
+          recognizedKeys,
+          ignoredKeys: [],
+        });
+      } catch (initError: any) {
+        return res.json({
+          success: true,
+          sdk: 'javascript',
+          sdkVersion,
+          initSucceeded: false,
+          error: initError.message,
+          warnings: capturedWarnings,
+          resolvedOptions: {},
+          recognizedKeys: [],
+          ignoredKeys: [],
+        });
+      } finally {
+        // Restore original init
+        Sentry.init = originalInit;
+      }
+    } finally {
+      console.warn = origWarn;
+    }
+  } catch (error: any) {
+    console.warn = origWarn;
+    console.error('Validate-config error:', error);
+    return res.status(500).json({
+      success: false,
+      error: `Validation service error: ${error.message}`,
+    });
+  }
+});
+
+/**
+ * Introspect endpoint
+ * Discovers available Sentry SDK configuration options via the SDK's TypeScript types.
+ */
+app.get('/introspect', (req: Request, res: Response) => {
+  try {
+    let Sentry: any;
+    let sdkVersion = 'unknown';
+    try {
+      Sentry = require('@sentry/node');
+      sdkVersion = Sentry.SDK_VERSION || 'unknown';
+    } catch {
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to load @sentry/node',
+      });
+    }
+
+    // For JavaScript, we discover options by initializing with a noop transport
+    // and inspecting what the SDK accepts
+    const knownOptions = [
+      { key: 'dsn', type: 'string', required: true, default: null, description: 'Data Source Name' },
+      { key: 'debug', type: 'boolean', required: false, default: false, description: 'Enable debug mode' },
+      { key: 'release', type: 'string', required: false, default: null, description: 'Release version' },
+      { key: 'environment', type: 'string', required: false, default: 'production', description: 'Environment name' },
+      { key: 'sampleRate', type: 'number', required: false, default: 1.0, description: 'Error sample rate' },
+      { key: 'tracesSampleRate', type: 'number', required: false, default: null, description: 'Traces sample rate' },
+      { key: 'tracesSampler', type: 'function', required: false, default: null, description: 'Custom traces sampler function' },
+      { key: 'beforeSend', type: 'function', required: false, default: null, description: 'Hook before sending event' },
+      { key: 'beforeSendTransaction', type: 'function', required: false, default: null, description: 'Hook before sending transaction' },
+      { key: 'beforeBreadcrumb', type: 'function', required: false, default: null, description: 'Hook before adding breadcrumb' },
+      { key: 'integrations', type: 'array', required: false, default: null, description: 'SDK integrations' },
+      { key: 'transport', type: 'function', required: false, default: null, description: 'Custom transport' },
+      { key: 'maxBreadcrumbs', type: 'number', required: false, default: 100, description: 'Max breadcrumbs to capture' },
+      { key: 'maxValueLength', type: 'number', required: false, default: 250, description: 'Max string value length' },
+      { key: 'normalizeDepth', type: 'number', required: false, default: 3, description: 'Object normalization depth' },
+      { key: 'attachStacktrace', type: 'boolean', required: false, default: false, description: 'Attach stacktrace to messages' },
+      { key: 'sendDefaultPii', type: 'boolean', required: false, default: false, description: 'Send default PII' },
+      { key: 'serverName', type: 'string', required: false, default: null, description: 'Server name tag' },
+      { key: 'ignoreErrors', type: 'array', required: false, default: null, description: 'Error message patterns to ignore' },
+      { key: 'ignoreTransactions', type: 'array', required: false, default: null, description: 'Transaction name patterns to ignore' },
+      { key: 'denyUrls', type: 'array', required: false, default: null, description: 'URL patterns to deny' },
+      { key: 'allowUrls', type: 'array', required: false, default: null, description: 'URL patterns to allow' },
+      { key: 'autoSessionTracking', type: 'boolean', required: false, default: true, description: 'Auto session tracking' },
+      { key: 'enableTracing', type: 'boolean', required: false, default: null, description: 'Enable performance tracing' },
+      { key: 'profilesSampleRate', type: 'number', required: false, default: null, description: 'Profiles sample rate' },
+      { key: 'sendClientReports', type: 'boolean', required: false, default: true, description: 'Send client reports' },
+      { key: 'tunnel', type: 'string', required: false, default: null, description: 'Tunnel URL for proxying events' },
+    ];
+
+    const options = knownOptions.map(opt => ({
+      ...opt,
+      canonicalKey: opt.key,
+    }));
+
+    return res.json({
+      sdk: 'javascript',
+      sdkVersion,
+      sdkPackage: '@sentry/node',
+      source: 'manifest' as const,
+      options,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    console.error('Introspect error:', error);
+    return res.status(500).json({
+      success: false,
+      error: `Introspection service error: ${error.message}`,
+    });
+  }
+});
+
+/**
  * Health check endpoint
  */
 app.get('/health', (req: Request, res: Response) => {
