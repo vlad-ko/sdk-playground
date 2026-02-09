@@ -191,6 +191,12 @@ $app->post('/validate-config', function (Request $request, Response $response) {
         $capturedWarnings = [];
         $sdkVersion = 'unknown';
 
+        // Capture PHP warnings/notices during validation
+        set_error_handler(function ($severity, $message) use (&$capturedWarnings) {
+            $capturedWarnings[] = $message;
+            return true; // prevent default PHP error handling
+        }, E_WARNING | E_NOTICE | E_DEPRECATED | E_USER_WARNING | E_USER_NOTICE | E_USER_DEPRECATED);
+
         try {
             if (class_exists('\Sentry\SentrySdk')) {
                 $sdkVersion = \Sentry\Client::SDK_VERSION ?? 'unknown';
@@ -250,6 +256,7 @@ WRAPPER;
 
             $recognizedKeys = array_keys($resolvedOptions);
 
+            restore_error_handler();
             $response->getBody()->write(json_encode([
                 'success' => true,
                 'sdk' => 'php',
@@ -263,6 +270,7 @@ WRAPPER;
             return $response->withHeader('Content-Type', 'application/json');
 
         } catch (Throwable $e) {
+            restore_error_handler();
             $response->getBody()->write(json_encode([
                 'success' => true,
                 'sdk' => 'php',
@@ -278,6 +286,7 @@ WRAPPER;
         }
 
     } catch (Throwable $e) {
+        restore_error_handler();
         error_log('Validate-config error: ' . $e->getMessage());
         $response->getBody()->write(json_encode([
             'success' => false,

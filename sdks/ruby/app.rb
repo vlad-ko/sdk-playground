@@ -163,8 +163,11 @@ post '/validate-config' do
       require 'sentry-ruby'
       sdk_version = defined?(Sentry::VERSION) ? Sentry::VERSION : 'unknown'
 
-      # Capture warnings
+      # Capture warnings by overriding Kernel.warn
       original_warn = method(:warn)
+      define_method(:warn) do |*args|
+        captured_warnings << args.join(' ')
+      end
 
       # Execute the config code with Sentry available
       # Patch Sentry.init to inject noop transport
@@ -233,8 +236,9 @@ post '/validate-config' do
           ignoredKeys: []
         }.to_json
       ensure
-        # Restore original init
+        # Restore original init and warn
         Sentry.define_singleton_method(:init, original_init)
+        define_method(:warn, original_warn)
       end
 
     rescue LoadError => e

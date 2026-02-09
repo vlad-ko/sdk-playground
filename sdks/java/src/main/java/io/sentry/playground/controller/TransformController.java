@@ -14,6 +14,8 @@ import java.util.List;
 import java.util.Map;
 import java.lang.reflect.Method;
 import java.lang.reflect.Field;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 
 @RestController
 public class TransformController {
@@ -92,10 +94,14 @@ public class TransformController {
         result.put("success", true);
         result.put("sdk", "java");
         result.put("sdkVersion", sdkVersion);
-        result.put("warnings", warnings);
         result.put("resolvedOptions", new HashMap<>());
         result.put("recognizedKeys", new ArrayList<>());
         result.put("ignoredKeys", new ArrayList<>());
+
+        // Capture System.err to detect warnings during init
+        PrintStream originalErr = System.err;
+        ByteArrayOutputStream capturedErr = new ByteArrayOutputStream();
+        System.setErr(new PrintStream(capturedErr));
 
         try {
             // Use Groovy to execute the config code
@@ -105,8 +111,19 @@ public class TransformController {
         } catch (Exception e) {
             result.put("initSucceeded", false);
             result.put("error", e.getMessage());
+        } finally {
+            System.setErr(originalErr);
+            String errOutput = capturedErr.toString().trim();
+            if (!errOutput.isEmpty()) {
+                for (String line : errOutput.split("\n")) {
+                    if (!line.trim().isEmpty()) {
+                        warnings.add(line.trim());
+                    }
+                }
+            }
         }
 
+        result.put("warnings", warnings);
         return ResponseEntity.ok(result);
     }
 

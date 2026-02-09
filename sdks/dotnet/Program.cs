@@ -244,6 +244,11 @@ app.MapPost("/validate-config", async (ValidateConfigRequest request) =>
         var sdkVersion = typeof(SentrySdk).Assembly.GetName().Version?.ToString() ?? "unknown";
         var warnings = new List<string>();
 
+        // Capture Console.Error output to detect warnings during init
+        var originalErr = Console.Error;
+        var capturedErr = new System.IO.StringWriter();
+        Console.SetError(capturedErr);
+
         try
         {
             // Create script options with Sentry references
@@ -311,6 +316,14 @@ app.MapPost("/validate-config", async (ValidateConfigRequest request) =>
             // Close the SDK
             try { SentrySdk.Close(); } catch { }
 
+            // Collect captured warnings from stderr
+            Console.SetError(originalErr);
+            var errOutput = capturedErr.ToString();
+            if (!string.IsNullOrWhiteSpace(errOutput))
+            {
+                warnings.AddRange(errOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            }
+
             return Results.Json(new {
                 success = true,
                 sdk = "dotnet",
@@ -325,6 +338,14 @@ app.MapPost("/validate-config", async (ValidateConfigRequest request) =>
         catch (Exception ex)
         {
             try { SentrySdk.Close(); } catch { }
+
+            // Collect captured warnings from stderr
+            Console.SetError(originalErr);
+            var errOutput = capturedErr.ToString();
+            if (!string.IsNullOrWhiteSpace(errOutput))
+            {
+                warnings.AddRange(errOutput.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            }
 
             return Results.Json(new {
                 success = true,
@@ -341,6 +362,7 @@ app.MapPost("/validate-config", async (ValidateConfigRequest request) =>
     }
     catch (Exception ex)
     {
+        Console.SetError(originalErr);
         return Results.Json(new {
             success = false,
             error = $"Validation service error: {ex.Message}"
