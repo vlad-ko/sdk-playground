@@ -30,6 +30,7 @@ export interface OptionAnalysis {
   seGuidance?: string;
   docsUrl?: string;
   recognized: boolean;
+  source?: 'dictionary' | 'introspection';
   warnings: Warning[];
 }
 

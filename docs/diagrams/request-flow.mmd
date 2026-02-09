@@ -17,10 +17,15 @@ sequenceDiagram
     end
 
     rect rgb(232, 245, 233)
-        Note over U,A: Config Analyzer Flow (no SDK container needed)
+        Note over U,S: Config Analyzer Flow (introspection-first)
         U->>+A: POST /api/config/analyze<br/>{configCode, sdk}
         A->>A: Parse config (regex-based)
-        A->>A: Validate options against dictionary
+        A->>A: 1st pass: Lookup in JSON dictionary
+        alt Unknown options exist
+            A->>+S: GET /introspect (once)
+            S-->>-A: {options[], sdkVersion, source}
+            A->>A: 2nd pass: Check unknowns against introspection
+        end
         A->>A: Check missing required options
         A->>A: Generate recommendations
         A->>A: Calculate health score (0-100)

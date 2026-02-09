@@ -20,6 +20,7 @@ import { ConfigAnalyzer } from '../config-analyzer';
 import { validateConfigLive } from '../sdk-introspection/config-validator';
 import { introspectSDK } from '../sdk-introspection/sdk-introspector';
 import { syncDictionary } from '../sdk-introspection/dictionary-sync';
+import { scaffoldDictionary } from '../sdk-introspection/scaffold';
 
 const router = Router();
 
@@ -107,8 +108,8 @@ router.post('/analyze', async (req: Request, res: Response) => {
         });
     }
 
-    // Analyze the configuration
-    const result = analyzer.analyze(configCode, sdk);
+    // Analyze the configuration (with introspection fallback)
+    const result = await analyzer.analyze(configCode, sdk, introspectSDK);
 
     return res.json({
       success: true,
@@ -311,6 +312,35 @@ router.get('/dictionary/sync/:sdk', async (req: Request, res: Response) => {
     return res.status(500).json({
       success: false,
       error: 'Failed to sync dictionary',
+      message: error.message,
+    });
+  }
+});
+
+/**
+ * GET /api/config/dictionary/scaffold/:sdk
+ * Generate stub dictionary entries for introspected options not yet in the dictionary
+ */
+router.get('/dictionary/scaffold/:sdk', async (req: Request, res: Response) => {
+  try {
+    const sdk = typeof req.params.sdk === 'string' ? req.params.sdk : req.params.sdk[0];
+
+    const introspection = await introspectSDK(sdk);
+    const stubs = scaffoldDictionary(sdk, introspection);
+
+    return res.json({
+      success: true,
+      data: {
+        sdk,
+        stubCount: stubs.length,
+        stubs,
+      },
+    });
+  } catch (error: any) {
+    console.error('Dictionary scaffold error:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to scaffold dictionary',
       message: error.message,
     });
   }

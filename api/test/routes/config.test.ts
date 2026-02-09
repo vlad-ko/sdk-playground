@@ -164,6 +164,42 @@ describe('Config API Routes', () => {
     });
   });
 
+  describe('GET /api/config/dictionary/scaffold/:sdk', () => {
+    it('should return scaffold stubs for options not in dictionary', async () => {
+      introspectSDK.mockResolvedValueOnce({
+        sdk: 'cocoa',
+        sdkVersion: '8.0.0',
+        sdkPackage: 'Sentry',
+        source: 'manifest',
+        options: [
+          { key: 'dsn', canonicalKey: 'dsn', type: 'string', required: true, default: null, description: 'DSN' },
+          { key: 'brandNewOption', canonicalKey: 'brandNewOption', type: 'boolean', required: false, default: false, description: 'New opt' },
+        ],
+        timestamp: '2024-01-01T00:00:00Z',
+      });
+
+      const response = await request(app).get('/api/config/dictionary/scaffold/cocoa');
+
+      expect(response.status).toBe(200);
+      expect(response.body.success).toBe(true);
+      expect(response.body.data.sdk).toBe('cocoa');
+      // dsn is in dictionary so it should be skipped; brandNewOption should be scaffolded
+      expect(response.body.data.stubs.length).toBeGreaterThanOrEqual(1);
+      const keys = response.body.data.stubs.map((s: any) => s.key);
+      expect(keys).toContain('brandNewOption');
+      expect(keys).not.toContain('dsn');
+    });
+
+    it('should return 500 when SDK is unreachable', async () => {
+      introspectSDK.mockRejectedValueOnce(new Error('Connection refused'));
+
+      const response = await request(app).get('/api/config/dictionary/scaffold/cocoa');
+
+      expect(response.status).toBe(500);
+      expect(response.body.success).toBe(false);
+    });
+  });
+
   describe('GET /api/config/options', () => {
     it('should return all available options', async () => {
       const response = await request(app).get('/api/config/options');

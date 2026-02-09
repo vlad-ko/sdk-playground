@@ -3,18 +3,13 @@
  *
  * Central registry of all Sentry SDK configuration options with descriptions,
  * SE guidance, and validation information.
+ *
+ * Options are loaded from JSON files in api/config-dictionary/ at construction time.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { ConfigOption, ConfigDictionaryData, ConfigCategory } from './types';
-import { coreOptions } from './core-options';
-import { samplingOptions } from './sampling-options';
-import { hooksOptions } from './hooks-options';
-import { filteringOptions } from './filtering-options';
-import { integrationsOptions } from './integrations-options';
-import { transportOptions } from './transport-options';
-import { performanceOptions } from './performance-options';
-import { contextOptions } from './context-options';
-import { replayOptions } from './replay-options';
 
 const categoryDescriptions: Record<ConfigCategory, { name: string; description: string }> = {
   core: {
@@ -59,18 +54,9 @@ export class ConfigDictionary {
   private options: Map<string, ConfigOption>;
   private data: ConfigDictionaryData;
 
-  constructor() {
-    const allOptions = [
-      ...coreOptions,
-      ...samplingOptions,
-      ...hooksOptions,
-      ...filteringOptions,
-      ...integrationsOptions,
-      ...transportOptions,
-      ...performanceOptions,
-      ...contextOptions,
-      ...replayOptions,
-    ];
+  constructor(dictionaryDir?: string) {
+    const dir = dictionaryDir || path.join(__dirname, '../../config-dictionary');
+    const allOptions = this.loadOptionsFromDir(dir);
 
     this.options = new Map();
     allOptions.forEach(option => {
@@ -81,6 +67,34 @@ export class ConfigDictionary {
       options: allOptions,
       categories: categoryDescriptions,
     };
+  }
+
+  /**
+   * Load all ConfigOption arrays from JSON files in a directory
+   */
+  private loadOptionsFromDir(dir: string): ConfigOption[] {
+    if (!fs.existsSync(dir)) {
+      return [];
+    }
+
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+    const allOptions: ConfigOption[] = [];
+
+    for (const file of files) {
+      const filePath = path.join(dir, file);
+      const content = fs.readFileSync(filePath, 'utf-8');
+      const options: any[] = JSON.parse(content);
+
+      for (const opt of options) {
+        // Convert null supportedSDKs to undefined (JSON has no undefined)
+        if (opt.supportedSDKs === null) {
+          delete opt.supportedSDKs;
+        }
+        allOptions.push(opt as ConfigOption);
+      }
+    }
+
+    return allOptions;
   }
 
   /**

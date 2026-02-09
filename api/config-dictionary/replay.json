@@ -1,0 +1,114 @@
+[
+  {
+    "key": "replaysSessionSampleRate",
+    "displayName": "Replays Session Sample Rate",
+    "description": "The percentage of sessions to record for Session Replay. 1.0 records all sessions, 0.1 records 10%.",
+    "type": "number",
+    "category": "sampling",
+    "required": false,
+    "defaultValue": 0,
+    "examples": ["0.1", "0.01", "0.001"],
+    "docsUrl": "https://docs.sentry.io/platforms/javascript/session-replay/",
+    "seGuidance": "Start very low (0.001-0.01) in production - replays consume significant quota. Use for general UX insights. Higher rates for staging/QA. Monitor quota consumption closely.",
+    "warnings": [
+      "Replays consume significant quota - start with low rates",
+      "Must be between 0.0 and 1.0",
+      "Requires Replay integration to be added",
+      "1.0 (100%) will quickly exhaust quota on high-traffic sites"
+    ],
+    "relatedOptions": ["replaysOnErrorSampleRate"],
+    "supportedSDKs": ["javascript"]
+  },
+  {
+    "key": "replaysOnErrorSampleRate",
+    "displayName": "Replays On Error Sample Rate",
+    "description": "The percentage of sessions with errors to record. Records replay buffer when an error occurs.",
+    "type": "number",
+    "category": "sampling",
+    "required": false,
+    "defaultValue": 0,
+    "examples": ["1.0", "0.5", "0.1"],
+    "docsUrl": "https://docs.sentry.io/platforms/javascript/session-replay/",
+    "seGuidance": "More targeted than replaysSessionSampleRate - only records when errors happen. Set to 1.0 to capture all error sessions. Best practice: use this instead of session sampling for production.",
+    "warnings": [
+      "Buffer recording has memory overhead",
+      "Must be between 0.0 and 1.0",
+      "Requires Replay integration to be added",
+      "Combined with replaysSessionSampleRate for total replay coverage"
+    ],
+    "relatedOptions": ["replaysSessionSampleRate"],
+    "supportedSDKs": ["javascript"]
+  },
+  {
+    "key": "maskAllText",
+    "displayName": "Mask All Text",
+    "description": "Mask all text content in Session Replays to protect user privacy.",
+    "type": "boolean",
+    "category": "context",
+    "required": false,
+    "defaultValue": true,
+    "examples": ["true", "false"],
+    "docsUrl": "https://docs.sentry.io/platforms/javascript/session-replay/privacy/",
+    "seGuidance": "Default is true for privacy. Disable only if you need to see text content and have proper consent. Consider using selective masking with data-sentry-mask attributes instead.",
+    "warnings": [
+      "Disabling exposes all text content in replays",
+      "May violate privacy regulations if disabled",
+      "Use data-sentry-mask for selective masking"
+    ],
+    "relatedOptions": ["maskAllInputs", "blockAllMedia"],
+    "supportedSDKs": ["javascript"]
+  },
+  {
+    "key": "maskAllInputs",
+    "displayName": "Mask All Inputs",
+    "description": "Mask all input field values in Session Replays.",
+    "type": "boolean",
+    "category": "context",
+    "required": false,
+    "defaultValue": true,
+    "examples": ["true", "false"],
+    "docsUrl": "https://docs.sentry.io/platforms/javascript/session-replay/privacy/",
+    "seGuidance": "Keep enabled to protect form data. Critical for PII compliance. Passwords are always masked regardless of this setting.",
+    "warnings": [
+      "Disabling may expose sensitive user input",
+      "Password fields are always masked"
+    ],
+    "relatedOptions": ["maskAllText", "blockAllMedia"],
+    "supportedSDKs": ["javascript"]
+  },
+  {
+    "key": "blockAllMedia",
+    "displayName": "Block All Media",
+    "description": "Block all images and media in Session Replays to reduce payload size and protect content.",
+    "type": "boolean",
+    "category": "context",
+    "required": false,
+    "defaultValue": true,
+    "examples": ["true", "false"],
+    "docsUrl": "https://docs.sentry.io/platforms/javascript/session-replay/privacy/",
+    "seGuidance": "Reduces replay size and protects media content. Disable if visual context is important. Consider selective blocking with data-sentry-block.",
+    "relatedOptions": ["maskAllText", "maskAllInputs"],
+    "supportedSDKs": ["javascript"]
+  },
+  {
+    "key": "networkDetailAllowUrls",
+    "displayName": "Network Detail Allow URLs",
+    "description": "URLs for which to capture request/response bodies in Session Replay network tab.",
+    "type": "array",
+    "category": "context",
+    "required": false,
+    "examples": [
+      "[/^https:\\/\\/api\\.myapp\\.com/]",
+      "[\"https://api.myapp.com\"]"
+    ],
+    "docsUrl": "https://docs.sentry.io/platforms/javascript/session-replay/configuration/",
+    "seGuidance": "Capture API request/response bodies for debugging. Only include your own APIs. Never include third-party APIs. Be careful with sensitive data in responses.",
+    "warnings": [
+      "May capture sensitive data in request/response bodies",
+      "Only include URLs you control",
+      "Increases replay payload size"
+    ],
+    "relatedOptions": ["networkDetailDenyUrls"],
+    "supportedSDKs": ["javascript"]
+  }
+]

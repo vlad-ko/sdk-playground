@@ -1,0 +1,112 @@
+[
+  {
+    "key": "initialScope",
+    "displayName": "Initial Scope",
+    "description": "Set the initial scope configuration including user, tags, and extra data that applies to all events.",
+    "type": "object",
+    "category": "context",
+    "required": false,
+    "examples": [
+      "{ tags: { version: \"1.0.0\" } }",
+      "{ user: { id: \"123\" }, tags: { team: \"backend\" } }",
+      "(scope) => { scope.setTag(\"app\", \"myapp\"); return scope; }"
+    ],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/enriching-events/scopes/",
+    "seGuidance": "Use to set default tags or context that applies to all events. Common: app version, deployment environment, team owner. Can be an object or function. Function form gives more control.",
+    "warnings": [
+      "Avoid setting user PII here unless you have consent",
+      "Tags set here appear on all events",
+      "Prefer setting dynamic data via Sentry.setTag/setUser in code"
+    ],
+    "relatedOptions": ["environment", "release"],
+    "supportedSDKs": null
+  },
+  {
+    "key": "attachStacktrace",
+    "displayName": "Attach Stacktrace",
+    "description": "Attach stack traces to messages (not just errors). Helps trace where captureMessage calls originate.",
+    "type": "boolean",
+    "category": "context",
+    "required": false,
+    "defaultValue": false,
+    "examples": ["true", "false"],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/configuration/options/",
+    "seGuidance": "Enable during debugging to see where messages originate. Increases payload size. Useful for tracing log messages. Disable in production unless needed.",
+    "warnings": [
+      "Increases event payload size",
+      "May expose internal code paths",
+      "Only affects captureMessage, not exceptions (which always have stack traces)"
+    ],
+    "relatedOptions": ["beforeSend"],
+    "supportedSDKs": null
+  },
+  {
+    "key": "serverName",
+    "displayName": "Server Name",
+    "description": "Override the server name sent with events. Defaults to hostname. Useful for identifying specific servers or containers.",
+    "type": "string",
+    "category": "context",
+    "required": false,
+    "examples": [
+      "\"web-server-1\"",
+      "\"api-pod-abc123\"",
+      "process.env.HOSTNAME"
+    ],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/configuration/options/",
+    "seGuidance": "Set explicitly in containerized environments (Docker, K8s) where hostname may be random. Helps identify which server/pod generated errors. Use meaningful names.",
+    "warnings": [
+      "Auto-detected in most environments",
+      "Set explicitly in containers for meaningful names"
+    ],
+    "relatedOptions": ["environment", "release"],
+    "supportedSDKs": ["python", "javascript", "go", "java", "ruby", "php", "dotnet"]
+  },
+  {
+    "key": "includeLocalVariables",
+    "displayName": "Include Local Variables",
+    "description": "Include local variables in stack traces. Provides more context for debugging but may expose sensitive data.",
+    "type": "boolean",
+    "category": "context",
+    "required": false,
+    "defaultValue": false,
+    "examples": ["true", "false"],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/configuration/options/",
+    "seGuidance": "Powerful for debugging but use with caution. May capture passwords, tokens, or PII in variables. Consider using only in development/staging. Use beforeSend to scrub if enabled in production.",
+    "warnings": [
+      "May capture sensitive data in local variables",
+      "Increases payload size significantly",
+      "Use beforeSend to scrub sensitive variables if enabled",
+      "Performance impact during error capture"
+    ],
+    "relatedOptions": ["beforeSend", "sendDefaultPii"],
+    "supportedSDKs": ["python"]
+  },
+  {
+    "key": "maxStringLength",
+    "displayName": "Max String Length",
+    "description": "Maximum length for string values in events. Longer strings are truncated.",
+    "type": "number",
+    "category": "context",
+    "required": false,
+    "defaultValue": 1024,
+    "examples": ["512", "1024", "2048"],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/configuration/options/",
+    "seGuidance": "Controls truncation of long strings in context, breadcrumbs, etc. Increase if losing important data, decrease to reduce payload size.",
+    "relatedOptions": ["maxValueLength", "normalizeDepth"],
+    "supportedSDKs": null
+  },
+  {
+    "key": "sendClientReports",
+    "displayName": "Send Client Reports",
+    "description": "Send client reports with SDK health metrics like dropped events count.",
+    "type": "boolean",
+    "category": "context",
+    "required": false,
+    "defaultValue": true,
+    "examples": ["true", "false"],
+    "docsUrl": "https://docs.sentry.io/product/accounts/quotas/manage-event-stream-guide/#5-sdk-configuration-client-side",
+    "seGuidance": "Leave enabled to see SDK health in Sentry stats. Shows dropped events, rate limiting, etc. Minimal overhead. Helps diagnose integration issues.",
+    "relatedOptions": ["sampleRate", "beforeSend"],
+    "supportedSDKs": ["javascript", "python"]
+  }
+]

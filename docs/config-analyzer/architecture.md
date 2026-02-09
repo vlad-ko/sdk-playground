@@ -1,6 +1,6 @@
 # Architecture Overview
 
-The Configuration Analyzer consists of three main components that work together to analyze SDK configurations.
+The Configuration Analyzer uses an **introspection-first** architecture where live SDK containers are the source of truth for option existence, while a JSON dictionary provides supplementary metadata (SE guidance, warnings, examples).
 
 ## Component Diagram
 
@@ -9,53 +9,80 @@ The Configuration Analyzer consists of three main components that work together 
 │  Config Parser  │────▶│  Config         │────▶│  Analysis       │
 │  (per SDK)      │     │  Analyzer       │     │  Result         │
 └─────────────────┘     └─────────────────┘     └─────────────────┘
-                              │
-                              ▼
-                        ┌─────────────────┐
-                        │  Config         │
-                        │  Dictionary     │
-                        └─────────────────┘
+                              │    │
+                   ┌──────────┘    └──────────┐
+                   ▼                          ▼
+            ┌─────────────────┐     ┌─────────────────┐
+            │  JSON           │     │  SDK Container   │
+            │  Dictionary     │     │  (introspect)    │
+            │  (metadata)     │     │  (existence)     │
+            └─────────────────┘     └─────────────────┘
 ```
+
+### Two-Source Resolution
+
+1. **Dictionary** (JSON files) — rich metadata: SE guidance, warnings, examples, docs URLs
+2. **Introspection** (live SDK) — source of truth for whether an option exists in the SDK
+
+Options found in the dictionary are marked `source: 'dictionary'`. Options not in the dictionary but confirmed by SDK introspection are marked `source: 'introspection'`. Only options absent from **both** sources trigger "Unknown option" warnings.
 
 ## File Structure
 
 ```
-api/src/
-├── config-parsers/           # SDK-specific parsers
-│   ├── types.ts              # Shared types (IConfigParser, ParsedConfig)
-│   ├── index.ts              # Parser exports
-│   ├── javascript.ts
-│   ├── python.ts
-│   ├── go.ts
-│   ├── ruby.ts
-│   ├── php.ts
-│   ├── dotnet.ts
-│   ├── java.ts
-│   ├── cocoa.ts
-│   ├── rust.ts
-│   └── elixir.ts
+api/
+├── config-dictionary/           # JSON data files (outside src/)
+│   ├── core.json                # dsn, environment, release, etc.
+│   ├── sampling.json            # tracesSampleRate, sampleRate, etc.
+│   ├── hooks.json               # beforeSend, beforeBreadcrumb, etc.
+│   ├── filtering.json           # ignoreErrors, denyUrls, etc.
+│   ├── integrations.json        # integrations, auto-instrumentation
+│   ├── transport.json           # tunnel, transport, etc.
+│   ├── performance.json         # tracing, appHangTimeoutInterval
+│   ├── context.json             # tags, user context
+│   └── replay.json              # Session Replay options
 │
-├── config-dictionary/        # Options knowledge base
-│   ├── types.ts              # ConfigOption type definition
-│   ├── index.ts              # Dictionary class and exports
-│   ├── core-options.ts       # dsn, environment, release, etc.
-│   ├── sampling-options.ts   # tracesSampleRate, sampleRate, etc.
-│   ├── hooks-options.ts      # beforeSend, beforeBreadcrumb, etc.
-│   ├── filtering-options.ts  # ignoreErrors, denyUrls, etc.
-│   ├── integrations-options.ts # integrations, defaultIntegrations, etc.
-│   ├── transport-options.ts  # tunnel, transport, etc.
-│   ├── performance-options.ts # tracing options
-│   ├── context-options.ts    # tags, user context
-│   └── replay-options.ts     # Session Replay options
+├── src/
+│   ├── config-parsers/          # SDK-specific parsers
+│   │   ├── types.ts             # Shared types (IConfigParser, ParsedConfig)
+│   │   ├── index.ts             # Parser exports
+│   │   ├── javascript.ts
+│   │   ├── python.ts
+│   │   ├── go.ts
+│   │   ├── ruby.ts
+│   │   ├── php.ts
+│   │   ├── dotnet.ts
+│   │   ├── java.ts
+│   │   ├── cocoa.ts
+│   │   ├── rust.ts
+│   │   └── elixir.ts
+│   │
+│   ├── config-dictionary/       # Dictionary loader & types
+│   │   ├── types.ts             # ConfigOption type definition
+│   │   └── index.ts             # ConfigDictionary class (loads JSON)
+│   │
+│   ├── config-analyzer/         # Analysis logic
+│   │   ├── types.ts             # AnalysisResult, OptionAnalysis types
+│   │   ├── index.ts             # Exports
+│   │   ├── analyzer.ts          # Main ConfigAnalyzer class (async)
+│   │   └── sdk-config.ts        # SDK-specific formatting config
+│   │
+│   ├── sdk-introspection/       # Live SDK introspection
+│   │   ├── types.ts             # IntrospectionResponse types
+│   │   ├── sdk-introspector.ts  # HTTP client for /introspect endpoints
+│   │   ├── config-validator.ts  # Live config validation
+│   │   ├── dictionary-sync.ts   # Compare dictionary vs introspection
+│   │   └── scaffold.ts          # Generate stub entries from introspection
+│   │
+│   └── routes/
+│       └── config.ts            # /api/config/* endpoints
 │
-├── config-analyzer/          # Analysis logic
-│   ├── types.ts              # AnalysisResult, OptionAnalysis types
-│   ├── index.ts              # Exports
-│   ├── analyzer.ts           # Main ConfigAnalyzer class
-│   └── sdk-config.ts         # SDK-specific formatting config
-│
-└── routes/
-    └── config.ts             # /api/config/analyze endpoint
+└── test/
+    ├── config-dictionary/
+    │   └── json-loader.test.ts  # JSON loading tests
+    ├── config-analyzer/
+    │   └── analyzer.test.ts     # Analyzer + introspection fallback tests
+    └── sdk-introspection/
+        └── scaffold.test.ts     # Scaffold generation tests
 ```
 
 ## Data Flow
@@ -64,17 +91,14 @@ api/src/
 
 ```typescript
 // Route receives SDK name and config code
-app.post('/api/config/analyze', (req, res) => {
+app.post('/api/config/analyze', async (req, res) => {
   const { sdk, configCode } = req.body;
 
-  // Select appropriate parser based on SDK
-  const parser = getParserForSdk(sdk);
+  // Select appropriate parser-based analyzer
+  const analyzer = getAnalyzerForSdk(sdk);
 
-  // Create analyzer with parser
-  const analyzer = new ConfigAnalyzer(parser);
-
-  // Analyze and return results
-  const result = analyzer.analyze(configCode, sdk);
+  // Analyze with introspection fallback
+  const result = await analyzer.analyze(configCode, sdk, introspectSDK);
   res.json({ success: true, data: result });
 });
 ```
@@ -108,25 +132,34 @@ Parsers handle:
 
 ```typescript
 class ConfigAnalyzer {
-  analyze(configCode: string, sdk: string): AnalysisResult {
+  async analyze(
+    configCode: string,
+    sdk: string,
+    introspectFn?: IntrospectFn
+  ): Promise<AnalysisResult> {
     // 1. Parse the code
     const parsed = this.parser.parse(configCode);
 
-    // 2. Analyze each option
+    // 2. First pass: analyze each option against dictionary
     for (const [key, option] of parsed.options) {
-      // Normalize key (snake_case -> camelCase for lookup)
       const normalizedKey = this.normalizeKey(key);
-
-      // Look up in dictionary
       const dictOption = configDictionary.getOption(normalizedKey);
-
-      // Build analysis with warnings
-      // ...
+      // Build analysis with source='dictionary' if found
     }
 
-    // 3. Check for missing required options
-    // 4. Generate recommendations
-    // 5. Calculate health score
+    // 3. Second pass: introspection fallback for unknowns
+    const unknowns = optionAnalyses.filter(a => !a.recognized);
+    if (unknowns.length > 0 && introspectFn) {
+      const introspection = await introspectFn(sdk); // fetched ONCE
+      for (const unknown of unknowns) {
+        // Re-analyze against introspection data
+        // If found: source='introspection', recognized=true
+      }
+    }
+
+    // 4. Check for missing required options
+    // 5. Generate recommendations
+    // 6. Calculate health score
 
     return result;
   }
@@ -137,15 +170,27 @@ class ConfigAnalyzer {
 
 ```typescript
 class ConfigDictionary {
-  private options: Map<string, ConfigOption>;
-
-  getOption(key: string): ConfigOption | undefined {
-    return this.options.get(key);
+  constructor(dictionaryDir?: string) {
+    // Load all .json files from the dictionary directory
+    const dir = dictionaryDir || path.join(__dirname, '../../config-dictionary');
+    const allOptions = this.loadOptionsFromDir(dir);
+    // Build lookup maps
   }
 
-  getRequiredOptions(): ConfigOption[] {
-    return this.data.options.filter(opt => opt.required);
-  }
+  getOption(key: string): ConfigOption | undefined;
+  hasOption(key: string): boolean;
+  getAllOptions(): ConfigOption[];
+  getOptionsByCategory(category: string): ConfigOption[];
+}
+```
+
+### 5. Introspection Fallback (`sdk-introspection/sdk-introspector.ts`)
+
+```typescript
+// Called only when dictionary lookup fails for some options
+async function introspectSDK(sdk: string): Promise<IntrospectionResponse> {
+  // HTTP GET to SDK container's /introspect endpoint
+  // Returns: { sdk, sdkVersion, options: [...], source, timestamp }
 }
 ```
 

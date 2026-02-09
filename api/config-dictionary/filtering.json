@@ -1,0 +1,84 @@
+[
+  {
+    "key": "ignoreErrors",
+    "displayName": "Ignore Errors",
+    "description": "An array of strings or regex patterns to match error messages that should be ignored. Matching errors will not be sent to Sentry.",
+    "type": "array",
+    "category": "filtering",
+    "required": false,
+    "examples": [
+      "[\"Script error\", \"ResizeObserver loop limit exceeded\"]",
+      "[/NetworkError/i, /^Timeout$/]"
+    ],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/configuration/filtering/",
+    "seGuidance": "Use to filter known browser quirks, third-party script errors, or benign errors. Common: \"Script error\" (CORS), \"ResizeObserver\" (browser bugs). Reduces noise and quota usage.",
+    "warnings": [
+      "Use with caution - may hide legitimate issues",
+      "Regex patterns must be actual RegExp objects, not strings",
+      "Case-sensitive for strings, use regex for case-insensitive"
+    ],
+    "relatedOptions": ["denyUrls", "allowUrls", "beforeSend"],
+    "supportedSDKs": null
+  },
+  {
+    "key": "denyUrls",
+    "displayName": "Deny URLs",
+    "description": "An array of strings or regex patterns to match URLs. Errors from matching URLs will be ignored.",
+    "type": "array",
+    "category": "filtering",
+    "required": false,
+    "examples": [
+      "[/chrome-extension://, /extensions\\//, /^file:\\/\\//]",
+      "[\"https://cdn.example.com\", /googletagmanager/]"
+    ],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/configuration/filtering/",
+    "seGuidance": "Use to filter errors from browser extensions, CDN scripts, or third-party domains you cannot control. Common: chrome-extension, browser extensions, analytics scripts.",
+    "warnings": [
+      "Matches against error stack trace URLs",
+      "May filter out legitimate errors if patterns are too broad"
+    ],
+    "relatedOptions": ["allowUrls", "ignoreErrors"],
+    "supportedSDKs": null
+  },
+  {
+    "key": "allowUrls",
+    "displayName": "Allow URLs",
+    "description": "An array of strings or regex patterns to match URLs. Only errors from matching URLs will be sent (whitelist approach).",
+    "type": "array",
+    "category": "filtering",
+    "required": false,
+    "examples": [
+      "[/https?:\\/\\/(www\\.)?myapp\\.com/]",
+      "[\"https://myapp.com\", \"https://api.myapp.com\"]"
+    ],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/configuration/filtering/",
+    "seGuidance": "Use for strict filtering - only allow errors from your domain. Useful when loading many third-party scripts. More restrictive than denyUrls. Recommended for production apps with external scripts.",
+    "warnings": [
+      "Blocks ALL errors not matching patterns - be comprehensive",
+      "Must include all your domains (main app, API, CDN)",
+      "Prefer denyUrls for most cases - allowUrls is very restrictive"
+    ],
+    "relatedOptions": ["denyUrls", "ignoreErrors"],
+    "supportedSDKs": null
+  },
+  {
+    "key": "ignoreTransactions",
+    "displayName": "Ignore Transactions",
+    "description": "An array of strings or regex patterns to match transaction names that should be ignored. Matching transactions will not be sent.",
+    "type": "array",
+    "category": "filtering",
+    "required": false,
+    "examples": [
+      "[\"GET /health\", \"OPTIONS /*\"]",
+      "[/^\\/health/, /^\\/ping/, /^OPTIONS/]"
+    ],
+    "docsUrl": "https://docs.sentry.io/platform-redirect/?next=/performance/",
+    "seGuidance": "Use to filter health checks, preflight requests, or low-value transactions. Common: /health, /ping, /metrics, OPTIONS requests. Reduces performance quota consumption.",
+    "warnings": [
+      "Only affects performance transactions, not errors",
+      "Applied before beforeSendTransaction"
+    ],
+    "relatedOptions": ["beforeSendTransaction", "tracesSampler"],
+    "supportedSDKs": null
+  }
+]
