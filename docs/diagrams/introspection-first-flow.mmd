@@ -1,0 +1,35 @@
+flowchart TD
+    A[POST /api/config/analyze] --> B[Select Parser for SDK]
+    B --> C[Parse config code]
+    C --> D[First Pass: Dictionary Lookup]
+
+    D --> E{Option in<br/>JSON Dictionary?}
+
+    E -->|Yes| F["✅ recognized=true<br/>source='dictionary'<br/>Rich metadata: SE guidance,<br/>warnings, examples"]
+    E -->|No| G[Collect as Unknown]
+
+    G --> H{Any unknowns<br/>AND introspectFn<br/>provided?}
+
+    H -->|No| I["⚠️ recognized=false<br/>Unknown option warning"]
+    H -->|Yes| J["Second Pass:<br/>Fetch /introspect from<br/>SDK container (once)"]
+
+    J --> K{Introspection<br/>succeeded?}
+
+    K -->|No - graceful degradation| I
+    K -->|Yes| L{Option in<br/>introspection<br/>response?}
+
+    L -->|Yes| M["✅ recognized=true<br/>source='introspection'<br/>Info: not yet in dictionary"]
+    L -->|No| I
+
+    F --> N[Check missing required options]
+    M --> N
+    I --> N
+
+    N --> O[Generate recommendations]
+    O --> P[Calculate health score 0-100]
+    P --> Q[Return AnalysisResult]
+
+    style F fill:#c8e6c9,stroke:#388e3c
+    style M fill:#fff9c4,stroke:#f9a825
+    style I fill:#ffcdd2,stroke:#d32f2f
+    style J fill:#bbdefb,stroke:#1976d2

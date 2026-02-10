@@ -1,117 +1,178 @@
 # Adding New Options
 
-This guide explains how to add new configuration options to the dictionary.
+This guide explains the two ways options become recognized by the Config Analyzer: dictionary entries and SDK introspection.
 
-## When to Add Options
+## How Options Are Recognized
 
-Add new options when:
-- Sentry releases a new SDK configuration option
-- An SDK-specific option is missing
-- Users report "Unknown option" warnings for valid options
+The Config Analyzer uses a **two-source resolution** strategy:
 
-## Step 1: Identify the Category
+1. **Dictionary** (JSON files) — for curated metadata: SE guidance, warnings, examples
+2. **SDK Introspection** (live container) — automatic recognition of any option the SDK reports
 
-Options are organized by category. Choose the most appropriate:
+An option only triggers "Unknown" if it's absent from **both** sources. This means:
+- New SDK options are recognized immediately via introspection (no dictionary update needed)
+- Dictionary entries add rich metadata that introspection alone can't provide
+
+## Adding to the Dictionary
+
+Add dictionary entries when you want to provide **curated metadata** — SE guidance, warnings, examples, docs URLs — beyond simple recognition.
+
+### Step 1: Identify the Category
+
+Options are organized by category in JSON files:
 
 | Category | File | Use For |
 |----------|------|---------|
-| `core` | `core-options.ts` | dsn, environment, release, enabled |
-| `sampling` | `sampling-options.ts` | Sample rates, sampling functions |
-| `hooks` | `hooks-options.ts` | beforeSend, beforeBreadcrumb, etc. |
-| `filtering` | `filtering-options.ts` | ignoreErrors, denyUrls, allowUrls |
-| `integrations` | `integrations-options.ts` | SDK integrations, auto-instrumentation |
-| `transport` | `transport-options.ts` | Network, tunneling, offline |
-| `performance` | `performance-options.ts` | Tracing configuration |
-| `context` | `context-options.ts` | Tags, user context |
-| `replay` | `replay-options.ts` | Session Replay options |
+| `core` | `api/config-dictionary/core.json` | dsn, environment, release, enabled |
+| `sampling` | `api/config-dictionary/sampling.json` | Sample rates, sampling functions |
+| `hooks` | `api/config-dictionary/hooks.json` | beforeSend, beforeBreadcrumb, etc. |
+| `filtering` | `api/config-dictionary/filtering.json` | ignoreErrors, denyUrls, allowUrls |
+| `integrations` | `api/config-dictionary/integrations.json` | SDK integrations, auto-instrumentation |
+| `transport` | `api/config-dictionary/transport.json` | Network, tunneling, offline |
+| `performance` | `api/config-dictionary/performance.json` | Tracing configuration |
+| `context` | `api/config-dictionary/context.json` | Tags, user context |
+| `replay` | `api/config-dictionary/replay.json` | Session Replay options |
 
-## Step 2: Write the Test First (TDD)
+### Step 2: Write the Test First (TDD)
 
 Add a test in `api/test/config-analyzer/analyzer.test.ts`:
 
 ```typescript
-it('should recognize myNewOption', () => {
+it('should recognize myNewOption from dictionary', async () => {
   const config = `Sentry.init({
     dsn: "https://test@o0.ingest.sentry.io/0",
     myNewOption: true
   });`;
 
-  const result = analyzer.analyze(config, 'javascript');
+  const result = await analyzer.analyze(config, 'javascript');
 
   const option = result.options.find(o => o.key === 'myNewOption');
   expect(option).toBeDefined();
   expect(option?.recognized).toBe(true);
+  expect(option?.source).toBe('dictionary');
 });
 ```
 
 Run the test to verify it fails:
 ```bash
+docker-compose build api
 docker run --rm sdk-playground-api npm test -- --testPathPattern="analyzer"
 ```
 
-## Step 3: Add the Option
+### Step 3: Add the Option to JSON
 
-Open the appropriate file in `api/src/config-dictionary/` and add:
+Open the appropriate JSON file and add an entry:
 
-```typescript
+```json
 {
-  key: 'myNewOption',           // camelCase, canonical name
-  displayName: 'My New Option', // Human-readable
-  description: 'What this option does and when to use it.',
-  type: 'boolean',              // string | number | boolean | array | function | object
-  category: 'core',             // Must match the file's category
-  required: false,
-  defaultValue: false,
-  examples: ['true', 'false'],
-  docsUrl: 'https://docs.sentry.io/...',
-  seGuidance: 'SE advice for customers asking about this option.',
-  warnings: [
-    'Any important cautions',
-  ],
-  relatedOptions: ['otherOption'],
-  supportedSDKs: ['javascript', 'python'], // Optional: if not all SDKs
-},
+  "key": "myNewOption",
+  "displayName": "My New Option",
+  "description": "What this option does and when to use it.",
+  "type": "boolean",
+  "category": "core",
+  "required": false,
+  "defaultValue": false,
+  "examples": ["true", "false"],
+  "docsUrl": "https://docs.sentry.io/...",
+  "seGuidance": "SE advice for customers asking about this option.",
+  "warnings": ["Any important cautions"],
+  "relatedOptions": ["otherOption"],
+  "supportedSDKs": null
+}
 ```
 
-## Step 4: Run Tests
+**Field notes:**
+- `key`: camelCase, canonical name
+- `supportedSDKs`: use `null` for all SDKs, or `["cocoa", "python"]` to restrict
+- `defaultValue`: use `null` for no default
+
+### Step 4: Run Tests
 
 ```bash
-# Run analyzer tests
-docker run --rm sdk-playground-api npm test -- --testPathPattern="analyzer"
-
-# Run all tests
+docker-compose build api
 docker run --rm sdk-playground-api npm test
 ```
 
-## Step 5: Rebuild Container
+## Using the Scaffold Tool
+
+When an SDK has options not yet in the dictionary, the **scaffold endpoint** generates stub entries for you:
 
 ```bash
-# Force rebuild without cache
-DOCKER_BUILDKIT=0 docker-compose build --no-cache api
-
-# Restart
-docker-compose up -d api
+# See what options are in the SDK but not in the dictionary
+curl http://localhost:4000/api/config/dictionary/scaffold/cocoa | python3 -m json.tool
 ```
+
+This returns pre-filled stubs with:
+- `key`, `type`, `description` from introspection
+- `supportedSDKs` set to the current SDK
+- Empty `seGuidance`, `warnings`, `examples` for human curation
+
+You can copy these stubs into the appropriate JSON file and fill in the curated fields.
+
+### Scaffold Type Mapping
+
+The scaffold maps SDK-reported types to dictionary types:
+
+| Introspection Type | Dictionary Type |
+|-------------------|-----------------|
+| `float`, `double`, `int`, `integer` | `number` |
+| `bool`, `boolean` | `boolean` |
+| `str`, `string` | `string` |
+| `list`, `array`, `string[]` | `array` |
+| `callable`, `callback`, `func`, `closure` | `function` |
 
 ## Adding SDK-Specific Options
 
 For options that only apply to certain SDKs:
 
-```typescript
+```json
 {
-  key: 'enableSwizzling',
-  displayName: 'Enable Swizzling',
-  description: 'Enable method swizzling for automatic instrumentation.',
-  type: 'boolean',
-  category: 'integrations',
-  supportedSDKs: ['cocoa'],  // Only for Cocoa SDK
-  // ...
-},
+  "key": "appHangTimeoutInterval",
+  "displayName": "App Hang Timeout Interval",
+  "description": "Duration in seconds that the app must be unresponsive before an app hang event is created.",
+  "type": "number",
+  "category": "performance",
+  "supportedSDKs": ["cocoa"],
+  "defaultValue": 2.0,
+  "seGuidance": "Cocoa-specific. Increase if false-positive app-hangs are reported."
+}
 ```
 
 When `supportedSDKs` is specified:
 - Option is recognized only for listed SDKs
-- Warning shown if used with unsupported SDK
+- Warning shown if used with an unsupported SDK
+
+## Updating Cocoa Manifest
+
+The Cocoa SDK uses a **manifest-based** introspection (no runtime reflection in Swift). To add options to introspection:
+
+Edit `sdks/cocoa/Sources/App/routes.swift` and add entries to the `options` array in the `/introspect` endpoint:
+
+```swift
+["key": AnyCodable("newOption"), "canonicalKey": AnyCodable("newOption"),
+ "type": AnyCodable("boolean"), "required": AnyCodable(false),
+ "default": AnyCodable(false), "description": AnyCodable("Description here")],
+```
+
+Then rebuild the Cocoa container:
+```bash
+docker-compose build sdk-cocoa
+```
+
+## Dictionary Sync
+
+To check how well the dictionary covers an SDK's options:
+
+```bash
+# Compare dictionary vs live introspection
+curl http://localhost:4000/api/config/dictionary/sync/python | python3 -m json.tool
+```
+
+Returns:
+- `matched` — options in both dictionary and SDK
+- `dictionaryOnly` — in dictionary but not reported by SDK
+- `sdkOnly` — in SDK but not in dictionary (candidates for scaffolding)
+- `syncScore` — coverage percentage
 
 ## Naming Conventions
 
@@ -140,62 +201,13 @@ if (normalizedKey === 'myNewOption') {
 }
 ```
 
-## Example: Adding Cocoa Option
-
-Here's a complete example of adding `enableNetworkTracking` for Cocoa:
-
-### 1. Add Test
-```typescript
-// analyzer.test.ts
-it('should recognize enableNetworkTracking option', () => {
-  const config = `SentrySDK.start { options in
-    options.dsn = "https://test@o0.ingest.sentry.io/0"
-    options.enableNetworkTracking = true
-  }`;
-
-  const result = analyzer.analyze(config, 'cocoa');
-
-  const option = result.options.find(o => o.key === 'enableNetworkTracking');
-  expect(option).toBeDefined();
-  expect(option?.recognized).toBe(true);
-});
-```
-
-### 2. Add Option
-```typescript
-// integrations-options.ts
-{
-  key: 'enableNetworkTracking',
-  displayName: 'Enable Network Tracking',
-  description: 'Automatically create spans for network requests.',
-  type: 'boolean',
-  category: 'performance',
-  required: false,
-  defaultValue: true,
-  examples: ['true', 'false'],
-  docsUrl: 'https://docs.sentry.io/platforms/apple/tracing/',
-  seGuidance: 'Enable to see HTTP requests as spans in traces.',
-  relatedOptions: ['tracesSampleRate', 'enableSwizzling'],
-  supportedSDKs: ['cocoa'],
-},
-```
-
-### 3. Verify
-```bash
-docker run --rm sdk-playground-api npm test -- --testPathPattern="analyzer"
-# Should pass
-
-DOCKER_BUILDKIT=0 docker-compose build --no-cache api
-docker-compose up -d api
-```
-
 ## Checklist
 
 - [ ] Test written first (TDD)
-- [ ] Option added to correct category file
+- [ ] Option added to correct JSON category file
 - [ ] All required fields filled in
 - [ ] `docsUrl` points to valid documentation
 - [ ] `seGuidance` provides helpful SE advice
-- [ ] `supportedSDKs` specified if not universal
-- [ ] Tests pass
-- [ ] Container rebuilt and restarted
+- [ ] `supportedSDKs` specified if not universal (use `null` for all)
+- [ ] Tests pass in Docker
+- [ ] Container rebuilt

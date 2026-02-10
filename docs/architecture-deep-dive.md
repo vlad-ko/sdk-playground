@@ -10,6 +10,11 @@
   - [Transform Flow](#transform-flow)
   - [Config Analyzer Flow](#config-analyzer-flow)
   - [Query Validation Flow](#query-validation-flow)
+- [Introspection-First Design](#introspection-first-design)
+  - [Motivation](#motivation)
+  - [Two-Source Resolution](#two-source-resolution)
+  - [JSON Dictionary](#json-dictionary)
+  - [Scaffold Tool](#scaffold-tool)
 - [Health Score System](#health-score-system)
   - [Scoring Algorithm](#scoring-algorithm)
   - [Warning Sources](#warning-sources)
@@ -54,6 +59,7 @@ docker-compose up
        +---> API Gateway starts (port 4000)
        |       depends_on: all SDK containers
        |       Mounts 7 route modules
+       |       Loads JSON dictionary from api/config-dictionary/
        |
        +---> UI starts last (port 3000)
                depends_on: api
@@ -105,20 +111,25 @@ The primary feature — executes user-provided `beforeSend`, `tracesSampler`, an
 
 ### Config Analyzer Flow
 
-Validates `Sentry.init()` configurations and produces health scores + recommendations. **Stays entirely within the API — no SDK containers involved.**
+Validates `Sentry.init()` configurations and produces health scores + recommendations. Uses an **introspection-first** strategy that checks options against both a JSON dictionary and live SDK containers.
 
-**Path:** `UI -> POST /api/config/analyze -> Config Analyzer -> Response`
+**Path:** `UI -> POST /api/config/analyze -> Config Analyzer -> (optional) SDK Container /introspect -> Response`
+
+![Introspection-First Flow](diagrams/introspection-first-flow.mmd)
 
 1. **UI** sends `{ configCode, sdk }` to `POST /api/config/analyze`
 2. **Config Route** (`api/src/routes/config.ts`) selects the appropriate `ConfigAnalyzer` instance
-3. **ConfigAnalyzer** (`api/src/config-analyzer/analyzer.ts`) runs the `analyze()` pipeline:
-   - Parse config using a language-specific `IConfigParser` (regex-based)
-   - Analyze each option against the `ConfigDictionary`
+3. **ConfigAnalyzer** (`api/src/config-analyzer/analyzer.ts`) runs the async `analyze()` pipeline:
+   - **Parse** config using a language-specific `IConfigParser` (regex-based)
+   - **First pass**: Analyze each option against the `ConfigDictionary` (JSON files)
+   - **Second pass** (if unknowns exist): Fetch introspection from SDK container (`GET /introspect`, called **once**), re-analyze unknown options
    - Check for missing required options
    - Generate recommendations
    - Calculate health score
    - Generate summary text
 4. Returns `{ score, warnings, recommendations, summary, options }`
+
+**Introspection is only called when needed** — if all options are in the dictionary, no SDK container request is made. If introspection fails (container down, timeout), the analyzer gracefully degrades to dictionary-only behavior.
 
 ### Query Validation Flow
 
@@ -136,6 +147,72 @@ Validates Sentry search queries and suggests corrections for typos.
 
 ---
 
+## Introspection-First Design
+
+### Motivation
+
+Previously, a static TypeScript dictionary was the **sole gatekeeper** for option recognition. Every time an SDK added or changed an option, the dictionary would drift, producing false positive "Unknown option" warnings. The root cause was architectural: **option existence** and **option metadata** were conflated in a single static store.
+
+The introspection-first design separates these concerns:
+- **Existence** → determined by the SDK itself (via `/introspect` endpoint)
+- **Metadata** → provided by the dictionary (SE guidance, warnings, examples)
+
+### Two-Source Resolution
+
+```
+Option → Dictionary lookup
+  → Found? → source='dictionary', use rich metadata ✅
+  → Not found? → Check introspection data (pre-fetched once per analyze call)
+      → Found in SDK? → source='introspection', recognized=true, info note ✅
+      → Not found? → recognized=false, "Unknown option" warning ⚠️
+```
+
+This means:
+- **Zero false positives** for SDK-supported options (even if dictionary is incomplete)
+- **Rich metadata** for curated options (SE guidance, warnings, examples)
+- **Graceful degradation** if SDK containers are down (falls back to dictionary-only)
+- **Info notes** when an option is recognized via introspection, prompting dictionary curation
+
+### JSON Dictionary
+
+The dictionary was migrated from 9 TypeScript files to 9 JSON files at `api/config-dictionary/`. This provides:
+
+- **Data/code separation** — option definitions are data, not logic
+- **No TypeScript rebuild required** — edit JSON, rebuild Docker, done
+- **Clean diffs** — JSON changes are easy to review
+- **Testability** — `ConfigDictionary` constructor accepts a custom directory
+
+The `ConfigDictionary` class loads all `.json` files at startup:
+
+```typescript
+class ConfigDictionary {
+  constructor(dictionaryDir?: string) {
+    const dir = dictionaryDir || path.join(__dirname, '../../config-dictionary');
+    const allOptions = this.loadOptionsFromDir(dir);
+    // Build lookup maps...
+  }
+}
+```
+
+JSON `null` for `supportedSDKs` is converted to `undefined` at load time (meaning "all SDKs supported").
+
+### Scaffold Tool
+
+The scaffold endpoint bridges the gap between introspection and dictionary:
+
+```
+GET /api/config/dictionary/scaffold/:sdk
+```
+
+It introspects the SDK, compares against the dictionary, and generates stub `ConfigOption` entries for options not yet in the dictionary. Stubs pre-fill `key`, `type`, `description`, and `supportedSDKs` from introspection, leaving `seGuidance`, `warnings`, and `examples` empty for human curation.
+
+Related endpoints:
+- `GET /api/config/introspect/:sdk` — raw introspection data
+- `GET /api/config/dictionary/sync/:sdk` — dictionary vs introspection coverage comparison
+- `POST /api/config/validate-live` — validate config against the real SDK
+
+---
+
 ## Health Score System
 
 ![Health Score Algorithm](diagrams/health-score.png)
@@ -144,7 +221,7 @@ The health score evaluates `Sentry.init()` configurations on a 0-100 scale. It l
 
 ### Scoring Algorithm
 
-The `calculateScore()` method (line 399-425) starts at 100 and applies deductions and bonuses:
+The `calculateScore()` method starts at 100 and applies deductions and bonuses:
 
 | Factor | Impact | Examples |
 |--------|--------|----------|
@@ -162,19 +239,20 @@ Final score is clamped to `[0, 100]`.
 
 Warnings are generated from three analysis phases:
 
-**1. Option Analysis** (`analyzeOption()`, line 165-219):
-- Unknown options not in the Config Dictionary
+**1. Option Analysis** (`analyzeOption()`):
+- Unknown options not in the Config Dictionary **and** not in SDK introspection
 - Options not supported in the selected SDK
 - Predefined warnings from dictionary entries
+- Options recognized via introspection but not yet in dictionary (info-level)
 
-**2. Value Validation** (`validateOptionValue()`, line 224-303):
+**2. Value Validation** (`validateOptionValue()`):
 - **DSN**: must start with `https://`, must contain `@` and `.ingest`
 - **Sample rates** (`sampleRate`, `tracesSampleRate`, `profilesSampleRate`): must be 0.0-1.0; 100% `tracesSampleRate` triggers a warning
 - **`debug: true`**: warns about production impact
 - **`sendDefaultPii: true`**: warns about privacy/GDPR implications
 
-**3. Missing Required Options** (`checkMissingRequired()`, line 308-324):
-- Currently only `dsn` is marked as required in the Config Dictionary (`config-dictionary/core-options.ts`)
+**3. Missing Required Options** (`checkMissingRequired()`):
+- Currently only `dsn` is marked as required in `api/config-dictionary/core.json`
 
 ### UI Rendering
 
@@ -194,7 +272,7 @@ The playground has **two independent suggestion systems** serving different mode
 
 ### Config Recommendations
 
-Generated by `generateRecommendations()` (line 329-395) in the Config Analyzer. These check if best-practice options are **absent** from the user's config:
+Generated by `generateRecommendations()` in the Config Analyzer. These check if best-practice options are **absent** from the user's config:
 
 | Missing Option | Priority | Recommendation Title |
 |----------------|----------|---------------------|
@@ -215,7 +293,7 @@ The `ConfigDictionary` also provides **SE Guidance** text for each option — ex
 
 Generated by the Query Validator (`api/src/sentry-query/query-validator.ts`) for the API Query Tester mode. Two-layer suggestion system:
 
-**Layer 1 — Alias Map** (line 436-452): Hardcoded mappings for common mistakes:
+**Layer 1 — Alias Map**: Hardcoded mappings for common mistakes:
 ```
 assignee    -> assigned
 lvl         -> level
@@ -227,7 +305,7 @@ user_email  -> user.email
 error_type  -> error.type
 ```
 
-**Layer 2 — Fuzzy Matching** (line 457-506): Levenshtein edit distance against all valid Sentry properties. Returns the closest match if distance <= 3.
+**Layer 2 — Fuzzy Matching**: Levenshtein edit distance against all valid Sentry properties. Returns the closest match if distance <= 3.
 
 ---
 
@@ -274,6 +352,27 @@ All SDK clients in `api/src/sdk-clients/` follow an identical pattern:
 
 Every container exposes a `GET /health` endpoint returning `{ status: "healthy", sdk: "<name>" }`. The API gateway aggregates these for service discovery and monitoring.
 
+### Introspection Pattern
+
+SDK containers that support introspection expose a `GET /introspect` endpoint returning:
+
+```json
+{
+  "sdk": "python",
+  "sdkVersion": "2.0.0",
+  "sdkPackage": "sentry-sdk",
+  "source": "reflection",
+  "options": [
+    { "key": "dsn", "canonicalKey": "dsn", "type": "string", "required": true, "default": null, "description": "..." }
+  ],
+  "timestamp": "2024-01-01T00:00:00Z"
+}
+```
+
+Introspection sources vary by SDK:
+- **Reflection** (Python, JS, Ruby, etc.) — inspects SDK at runtime
+- **Manifest** (Cocoa) — static list maintained in `routes.swift`
+
 ---
 
 ## Key File Reference
@@ -284,14 +383,18 @@ Every container exposes a `GET /health` endpoint returning `{ status: "healthy",
 | `sdks/registry.json` | SDK metadata: names, ports, status, packages |
 | `api/src/index.ts` | Express app entry point, route mounting |
 | `api/src/routes/transform.ts` | Main transform endpoint (beforeSend testing) |
-| `api/src/routes/config.ts` | Config analyzer endpoint |
+| `api/src/routes/config.ts` | Config analyzer + introspection + scaffold endpoints |
 | `api/src/routes/sentry-query.ts` | Query validation endpoint |
-| `api/src/config-analyzer/analyzer.ts` | **Health score algorithm + recommendations** |
+| `api/config-dictionary/*.json` | **JSON option definitions (9 category files)** |
+| `api/src/config-dictionary/index.ts` | JSON loader, ConfigDictionary class |
+| `api/src/config-dictionary/types.ts` | ConfigOption type definitions |
+| `api/src/config-analyzer/analyzer.ts` | **Health score algorithm + introspection fallback** |
 | `api/src/config-analyzer/sdk-config.ts` | Per-language syntax formatting |
-| `api/src/config-analyzer/types.ts` | Type definitions for analysis results |
-| `api/src/config-dictionary/index.ts` | Singleton registry of all config options |
-| `api/src/config-dictionary/core-options.ts` | Core option definitions (dsn, environment, etc.) |
-| `api/src/config-dictionary/hooks-options.ts` | Hook option definitions (beforeSend, etc.) |
+| `api/src/config-analyzer/types.ts` | AnalysisResult, OptionAnalysis (with `source` field) |
+| `api/src/sdk-introspection/sdk-introspector.ts` | HTTP client for SDK `/introspect` endpoints |
+| `api/src/sdk-introspection/config-validator.ts` | Live config validation against SDK containers |
+| `api/src/sdk-introspection/dictionary-sync.ts` | Dictionary vs introspection comparison |
+| `api/src/sdk-introspection/scaffold.ts` | Stub generation for uncurated options |
 | `api/src/config-parsers/javascript.ts` | JavaScript config parser (regex-based) |
 | `api/src/sentry-query/query-validator.ts` | **Query validation + fuzzy suggestions** |
 | `api/src/sdk-clients/*.ts` | HTTP clients for each SDK container |
@@ -299,6 +402,7 @@ Every container exposes a `GET /health` endpoint returning `{ status: "healthy",
 | `sdks/python/app.py` | Python SDK container (Flask + exec) |
 | `sdks/go/main.go` | Go SDK container (Gin + compile) |
 | `sdks/ruby/app.rb` | Ruby SDK container (Sinatra + eval) |
+| `sdks/cocoa/Sources/App/routes.swift` | Cocoa SDK container (manifest-based introspection) |
 | `ui/src/components/playgrounds/ConfigAnalyzerPlayground.tsx` | Health score UI rendering |
 | `ui/src/api/client.ts` | Frontend API client |
 | `ui/src/types/modes.ts` | 9 playground mode definitions |

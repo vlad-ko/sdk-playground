@@ -6,12 +6,17 @@
  * - Warnings for misconfigurations
  * - Recommendations for best practices
  * - Health score calculation
+ *
+ * Uses introspection as fallback for options not in the dictionary.
  */
 
 import { configDictionary } from '../config-dictionary';
 import { IConfigParser, ParsedConfig, ParsedOption } from '../config-parsers/types';
 import { AnalysisResult, OptionAnalysis, Warning, Recommendation, WarningSeverity } from './types';
 import { getSDKConfig, formatKeyForSDK, formatExample, getLambdaExample, usesSnakeCase } from './sdk-config';
+import { IntrospectionResponse, IntrospectedOption } from '../sdk-introspection/types';
+
+export type IntrospectFn = (sdk: string) => Promise<IntrospectionResponse>;
 
 export class ConfigAnalyzer {
   private parser: IConfigParser;
@@ -102,9 +107,20 @@ export class ConfigAnalyzer {
   }
 
   /**
-   * Analyze a configuration code string
+   * Find an option in introspection data by normalized key
    */
-  analyze(configCode: string, sdk: string): AnalysisResult {
+  private findInIntrospection(normalizedKey: string, introspection: IntrospectionResponse): IntrospectedOption | undefined {
+    return introspection.options.find(opt => {
+      const canonical = opt.canonicalKey || this.normalizeKey(opt.key);
+      return canonical === normalizedKey;
+    });
+  }
+
+  /**
+   * Analyze a configuration code string
+   * Optionally accepts an introspection function for fallback option recognition.
+   */
+  async analyze(configCode: string, sdk: string, introspectFn?: IntrospectFn): Promise<AnalysisResult> {
     // Parse the configuration
     const parsed = this.parser.parse(configCode);
 
@@ -129,13 +145,41 @@ export class ConfigAnalyzer {
       return result;
     }
 
-    // Analyze each option
+    // First pass: analyze each option (dictionary only)
     const optionAnalyses: OptionAnalysis[] = [];
     const warnings: Warning[] = [];
 
     for (const [key, parsedOption] of parsed.options.entries()) {
-      const analysis = this.analyzeOption(parsedOption, sdk);
+      const analysis = this.analyzeOption(parsedOption, sdk, null);
       optionAnalyses.push(analysis);
+    }
+
+    // If there are unrecognized options and an introspect function is provided,
+    // fetch introspection data once and re-analyze those options
+    const unknowns = optionAnalyses.filter(a => !a.recognized);
+    if (unknowns.length > 0 && introspectFn) {
+      let introspection: IntrospectionResponse | null = null;
+      try {
+        introspection = await introspectFn(sdk);
+      } catch {
+        // Graceful degradation: introspection failure is non-fatal
+      }
+
+      if (introspection) {
+        // Re-analyze unknown options with introspection data
+        for (let i = 0; i < optionAnalyses.length; i++) {
+          if (!optionAnalyses[i].recognized) {
+            const parsedOption = parsed.options.get(optionAnalyses[i].key);
+            if (parsedOption) {
+              optionAnalyses[i] = this.analyzeOption(parsedOption, sdk, introspection);
+            }
+          }
+        }
+      }
+    }
+
+    // Collect warnings from all option analyses
+    for (const analysis of optionAnalyses) {
       warnings.push(...analysis.warnings);
     }
 
@@ -162,7 +206,7 @@ export class ConfigAnalyzer {
   /**
    * Analyze a single configuration option
    */
-  private analyzeOption(parsedOption: ParsedOption, sdk: string): OptionAnalysis {
+  private analyzeOption(parsedOption: ParsedOption, sdk: string, introspection: IntrospectionResponse | null): OptionAnalysis {
     // Normalize key for dictionary lookup (handles Python snake_case -> camelCase)
     const normalizedKey = this.normalizeKey(parsedOption.key);
     const dictOption = configDictionary.getOption(normalizedKey);
@@ -178,43 +222,61 @@ export class ConfigAnalyzer {
       seGuidance: dictOption?.seGuidance,
       docsUrl: dictOption?.docsUrl,
       recognized: !!dictOption,
+      source: dictOption ? 'dictionary' : undefined,
       warnings: [],
     };
 
-    // Check if option is recognized
-    if (!dictOption) {
-      analysis.warnings.push({
-        severity: 'warning',
-        message: `Unknown option "${parsedOption.key}" - may be deprecated or SDK-specific`,
-        optionKey: parsedOption.key,
-      });
+    // Check if option is recognized via dictionary
+    if (dictOption) {
+      // Check SDK compatibility
+      if (dictOption.supportedSDKs && !dictOption.supportedSDKs.includes(sdk)) {
+        analysis.warnings.push({
+          severity: 'warning',
+          message: `Option "${parsedOption.key}" may not be supported in ${sdk} SDK`,
+          optionKey: parsedOption.key,
+        });
+      }
+
+      // Add option-specific warnings from dictionary
+      if (dictOption.warnings) {
+        dictOption.warnings.forEach(warningMsg => {
+          analysis.warnings.push({
+            severity: 'info',
+            message: warningMsg,
+            optionKey: parsedOption.key,
+          });
+        });
+      }
+
+      // Value-specific validation
+      const valueWarnings = this.validateOptionValue(parsedOption, dictOption);
+      analysis.warnings.push(...valueWarnings);
+
       return analysis;
     }
 
-    // Check SDK compatibility
-    if (dictOption.supportedSDKs && !dictOption.supportedSDKs.includes(sdk)) {
-      analysis.warnings.push({
-        severity: 'warning',
-        message: `Option "${parsedOption.key}" may not be supported in ${sdk} SDK`,
-        optionKey: parsedOption.key,
-      });
-    }
-
-    // Add option-specific warnings from dictionary
-    if (dictOption.warnings) {
-      dictOption.warnings.forEach(warningMsg => {
+    // Not in dictionary — try introspection fallback
+    if (introspection) {
+      const introspectedOpt = this.findInIntrospection(normalizedKey, introspection);
+      if (introspectedOpt) {
+        analysis.recognized = true;
+        analysis.source = 'introspection';
+        analysis.description = introspectedOpt.description || `SDK option recognized via introspection`;
         analysis.warnings.push({
           severity: 'info',
-          message: warningMsg,
+          message: `Option "${parsedOption.key}" recognized via SDK introspection (not yet in dictionary)`,
           optionKey: parsedOption.key,
         });
-      });
+        return analysis;
+      }
     }
 
-    // Value-specific validation
-    const valueWarnings = this.validateOptionValue(parsedOption, dictOption);
-    analysis.warnings.push(...valueWarnings);
-
+    // Not found in dictionary or introspection
+    analysis.warnings.push({
+      severity: 'warning',
+      message: `Unknown option "${parsedOption.key}" - may be deprecated or SDK-specific`,
+      optionKey: parsedOption.key,
+    });
     return analysis;
   }
 

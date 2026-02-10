@@ -1,23 +1,44 @@
 # Options Dictionary
 
-The options dictionary is the knowledge base that defines all recognized Sentry SDK configuration options with their descriptions, validation rules, and SE guidance.
+The options dictionary is a **supplementary metadata store** that enriches recognized SDK options with SE guidance, warnings, examples, and documentation links. It is stored as JSON files, separate from code.
+
+> **Important:** The dictionary is no longer the sole gatekeeper for option recognition. Options not found in the dictionary are checked against live SDK introspection before being marked "Unknown". See [architecture.md](architecture.md) for the full flow.
 
 ## Location
 
+Dictionary data lives as JSON files outside of `src/`, making them editable without TypeScript knowledge and diffable in code review:
+
 ```
-api/src/config-dictionary/
-├── index.ts              # ConfigDictionary class
-├── types.ts              # TypeScript interfaces
-├── core-options.ts       # Essential options
-├── sampling-options.ts   # Sampling configuration
-├── hooks-options.ts      # Event hooks/callbacks
-├── filtering-options.ts  # Error filtering
-├── integrations-options.ts # SDK integrations
-├── transport-options.ts  # Network/transport
-├── performance-options.ts # Performance monitoring
-├── context-options.ts    # Context/tags
-└── replay-options.ts     # Session Replay
+api/config-dictionary/           # JSON data files
+├── core.json                    # Essential: dsn, environment, release
+├── sampling.json                # Sample rates
+├── hooks.json                   # beforeSend, beforeBreadcrumb, etc.
+├── filtering.json               # ignoreErrors, denyUrls, allowUrls
+├── integrations.json            # SDK integrations, auto-instrumentation
+├── transport.json               # Network/transport
+├── performance.json             # Tracing, appHangTimeoutInterval
+├── context.json                 # Tags, user context
+└── replay.json                  # Session Replay
+
+api/src/config-dictionary/       # TypeScript loader
+├── index.ts                     # ConfigDictionary class (loads JSON at startup)
+└── types.ts                     # TypeScript interfaces
 ```
+
+### Why JSON?
+
+- **Data/code separation** — option definitions are data, not logic
+- **No TypeScript rebuild** — edit JSON, rebuild Docker container, done
+- **Clean diffs** — JSON changes are easy to review
+- **Testable** — `ConfigDictionary` accepts a custom directory for unit tests
+- **Volume-mountable** — JSON files can be mounted into Docker without a full rebuild
+
+### Path Resolution
+
+The loader uses `path.join(__dirname, '../../config-dictionary')` which resolves correctly from both development (`src/`) and production (`dist/`) paths:
+
+- `src/config-dictionary/index.ts` → `../../config-dictionary` → `api/config-dictionary/`
+- `dist/config-dictionary/index.js` → `../../config-dictionary` → `api/config-dictionary/`
 
 ## ConfigOption Interface
 
@@ -40,9 +61,23 @@ interface ConfigOption {
   seGuidance?: string;      // Solutions Engineering advice
   warnings?: string[];      // Cautions to display
   relatedOptions?: string[]; // Related option keys
-  supportedSDKs?: string[]; // If not all SDKs support this
+  supportedSDKs?: string[]; // If not all SDKs support this (null/omitted = all)
 }
 ```
+
+### JSON Conventions
+
+In JSON files, optional fields use `null` instead of `undefined`:
+
+```json
+{
+  "key": "dsn",
+  "displayName": "DSN",
+  "supportedSDKs": null
+}
+```
+
+At load time, `null` values for `supportedSDKs` are converted to `undefined`, meaning "all SDKs supported".
 
 ## Categories
 
@@ -62,25 +97,25 @@ Options are grouped into categories for organization:
 
 ## Example Option Definition
 
-```typescript
-// From core-options.ts
+```json
 {
-  key: 'dsn',
-  displayName: 'DSN',
-  description: 'The Data Source Name tells the SDK where to send events.',
-  type: 'string',
-  category: 'core',
-  required: true,
-  examples: [
-    'https://examplePublicKey@o0.ingest.sentry.io/0',
+  "key": "dsn",
+  "displayName": "DSN",
+  "description": "The Data Source Name tells the SDK where to send events.",
+  "type": "string",
+  "category": "core",
+  "required": true,
+  "examples": [
+    "https://examplePublicKey@o0.ingest.sentry.io/0"
   ],
-  docsUrl: 'https://docs.sentry.io/product/sentry-basics/dsn-explainer/',
-  seGuidance: 'The DSN is unique per project. Always use HTTPS. Keep DSNs secure.',
-  warnings: [
-    'Never commit DSNs to public repositories',
-    'Use environment variables to store DSNs',
+  "docsUrl": "https://docs.sentry.io/product/sentry-basics/dsn-explainer/",
+  "seGuidance": "The DSN is unique per project. Always use HTTPS. Keep DSNs secure.",
+  "warnings": [
+    "Never commit DSNs to public repositories",
+    "Use environment variables to store DSNs"
   ],
-  relatedOptions: ['tunnel', 'transport'],
+  "relatedOptions": ["tunnel", "transport"],
+  "supportedSDKs": null
 }
 ```
 
@@ -88,15 +123,14 @@ Options are grouped into categories for organization:
 
 Some options only apply to certain SDKs. Use `supportedSDKs` to restrict:
 
-```typescript
+```json
 {
-  key: 'enableSwizzling',
-  displayName: 'Enable Swizzling',
-  description: 'Enable method swizzling for automatic instrumentation.',
-  type: 'boolean',
-  category: 'integrations',
-  supportedSDKs: ['cocoa'],  // Only for iOS/macOS
-  // ...
+  "key": "appHangTimeoutInterval",
+  "displayName": "App Hang Timeout Interval",
+  "description": "Duration in seconds that the app must be unresponsive before an app hang event is created.",
+  "type": "number",
+  "category": "performance",
+  "supportedSDKs": ["cocoa"]
 }
 ```
 
@@ -152,19 +186,19 @@ const results = configDictionary.searchOptions('sample');
 
 ## Current Option Count
 
-The dictionary currently contains **57 options** across all categories:
+The dictionary currently contains **66 options** across all categories:
 
 | Category | Count |
 |----------|-------|
 | Core | 7 |
-| Sampling | 4 |
-| Hooks | 4 |
-| Filtering | 5 |
-| Integrations | 15 |
-| Transport | 5 |
-| Performance | 8 |
-| Context | 4 |
-| Replay | 5 |
+| Sampling | 5 |
+| Hooks | 5 |
+| Filtering | 4 |
+| Integrations | 16 |
+| Transport | 10 |
+| Performance | 7 |
+| Context | 6 |
+| Replay | 6 |
 
 ## Validation Rules
 
